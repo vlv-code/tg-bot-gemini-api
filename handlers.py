@@ -1,26 +1,31 @@
 import hashlib
 import html
+import io
 import logging
+from typing import Optional, Sequence, Union
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
     Message,
 )
+from aiogram.utils.chat_action import ChatActionSender
+from google.genai import types
 
 from config import settings
 from formatting import find_utf16_cut, markdown_to_chunks, split_plain_text, utf16_len
-from gemini_client import GeminiError, build_gemini_client
+from gemini_client import GeminiError, GeminiResponse, build_gemini_client
 from keyboards import models_keyboard, settings_keyboard
 from locks import UserLocks
 from middlewares import AccessMiddleware
 from rate_limiter import RateLimiter
-from storage import UserStorage
+from storage import UserState, UserStorage
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +34,19 @@ router.message.outer_middleware(AccessMiddleware())
 router.callback_query.outer_middleware(AccessMiddleware())
 router.inline_query.outer_middleware(AccessMiddleware())
 
-storage = UserStorage(default_model=settings.default_model, max_history=settings.max_history_messages)
-limiter = RateLimiter(per_minute=settings.rate_limit_per_minute, per_day=settings.rate_limit_per_day)
-gemini_client = build_gemini_client(settings.gemini_api_key, settings.system_prompt)
+storage = UserStorage(
+    db_path=settings.db_path,
+    default_model=settings.default_model,
+    max_history=settings.max_history_messages,
+)
+limiter = RateLimiter(
+    per_minute=settings.rate_limit_per_minute, per_day=settings.rate_limit_per_day
+)
+gemini_client = build_gemini_client(
+    api_key=settings.gemini_api_key,
+    default_system_prompt=settings.system_prompt,
+    default_voice=settings.tts_voice,
+)
 user_locks = UserLocks()
 
 
@@ -40,39 +55,121 @@ async def _limits_line(user_id: int) -> str:
     return f"📊 {status.used_minute}/{status.limit_minute} в минуту · {status.used_day}/{status.limit_day} сегодня"
 
 
+async def _send_response(
+    message: Message,
+    state: UserState,
+    response: GeminiResponse,
+    user_id: int,
+    force_voice: bool = False,
+) -> None:
+    """Отправляет ответ пользователю (голосовое сообщение и/или текст)."""
+    if (state.voice_mode or force_voice) and response.audio_bytes:
+        try:
+            voice_file = BufferedInputFile(response.audio_bytes, filename="voice.ogg")
+            await message.answer_voice(voice_file)
+        except Exception:
+            logger.exception("Не удалось отправить голосовое сообщение, переключаемся на текст")
+
+    if response.text:
+        if state.rich_mode:
+            for chunk_text, chunk_entities in markdown_to_chunks(response.text):
+                try:
+                    await message.answer(chunk_text, entities=chunk_entities)
+                except Exception:
+                    logger.warning("Ошибка отправки с entities, отправляем чистым текстом")
+                    await message.answer(chunk_text)
+        else:
+            for chunk in split_plain_text(response.text):
+                await message.answer(chunk)
+
+    await message.answer(await _limits_line(user_id))
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     state = await storage.get(message.from_user.id)
     await message.answer(
-        "Привет! Я бот-обёртка над Gemini API.\n\n"
+        "Привет! Я бот-ассистент на базе Google Gemini API.\n\n"
         f"Текущая модель: <b>{html.escape(state.model)}</b>\n\n"
-        "Команды:\n"
+        "<b>Команды:</b>\n"
         "/model — выбрать модель Gemini\n"
-        "/settings — rich-режим и очистка истории\n"
-        "/limits — сколько запросов осталось\n"
-        "/prompt — посмотреть или поменять system prompt\n\n"
-        "Просто напиши сообщение, чтобы начать диалог, "
-        "или в любом чате набери @username_бота вопрос — сработает через inline mode.",
+        "/settings — rich-режим, голосовые ответы и очистка истории\n"
+        "/prompt — посмотреть или задать свой system prompt\n"
+        "/tts &lt;текст&gt; — озвучить текст голосом\n"
+        "/limits — статистика и остаток лимитов\n\n"
+        "<b>Возможности:</b>\n"
+        "• Отправь текст, фото, документ (PDF) или голосовое сообщение — бот поймёт их!\n"
+        "• Используй inline-режим в любом чате: <code>@username_бота вопрос</code>.",
         parse_mode="HTML",
     )
 
 
 @router.message(Command("prompt"))
 async def cmd_prompt(message: Message) -> None:
+    user_id = message.from_user.id
+    state = await storage.get(user_id)
     args = message.text.split(maxsplit=1)
+
     if len(args) == 1:
-        current = gemini_client.system_prompt or "(не задан — Gemini отвечает без system instruction)"
+        effective = (
+            state.system_prompt
+            or settings.system_prompt
+            or "(не задан — поведение Gemini по умолчанию)"
+        )
+        is_custom = bool(state.system_prompt)
+        status = " (индивидуальный)" if is_custom else " (глобальный дефолт)"
         await message.answer(
-            f"Текущий system prompt:\n\n{html.escape(current)}\n\n"
-            "Чтобы поменять: /prompt текст нового промпта",
+            f"Текущий system prompt{status}:\n\n<code>{html.escape(effective)}</code>\n\n"
+            "Чтобы изменить: <code>/prompt текст промпта</code>\n"
+            "Чтобы сбросить к дефолту: <code>/prompt reset</code>",
             parse_mode="HTML",
         )
         return
 
-    gemini_client.system_prompt = args[1]
-    await message.answer(
-        "Готово ✅ (действует до рестарта контейнера — дефолт из SYSTEM_PROMPT в .env не менялся)"
-    )
+    new_prompt = args[1].strip()
+    if new_prompt.lower() == "reset":
+        await storage.set_system_prompt(user_id, "")
+        await message.answer("Системный промпт сброшен к значению по умолчанию ✅")
+    else:
+        await storage.set_system_prompt(user_id, new_prompt)
+        await message.answer("Индивидуальный system prompt сохранён в базе данных ✅")
+
+
+@router.message(Command("tts"))
+async def cmd_tts(message: Message) -> None:
+    args = message.text.split(maxsplit=1)
+    if len(args) == 1:
+        await message.answer("Использование: <code>/tts Текст для озвучки</code>", parse_mode="HTML")
+        return
+
+    text_to_speak = args[1].strip()
+    user_id = message.from_user.id
+
+    async with user_locks.get(user_id):
+        limit_status = await limiter.check(user_id)
+        if not limit_status.allowed:
+            wait_seconds = int(limit_status.retry_after) + 1
+            await message.answer(
+                f"⏳ Лимит запросов исчерпан, попробуй снова через {wait_seconds} сек.\n"
+                f"({await _limits_line(user_id)})"
+            )
+            return
+
+        async with ChatActionSender.record_voice(bot=message.bot, chat_id=message.chat.id):
+            try:
+                audio_bytes = await gemini_client.generate_speech(text_to_speak)
+            except GeminiError as exc:
+                await message.answer(f"⚠️ {exc}")
+                return
+            except Exception:
+                logger.exception("Ошибка при генерации TTS")
+                await message.answer("⚠️ Непредвиденная ошибка при генерации речи.")
+                return
+
+            await limiter.hit(user_id)
+
+        voice_file = BufferedInputFile(audio_bytes, filename="tts.ogg")
+        await message.answer_voice(voice_file)
 
 
 @router.message(Command("model"))
@@ -90,7 +187,7 @@ async def cb_model(callback: CallbackQuery) -> None:
 
     user_id = callback.from_user.id
     await storage.set_model(user_id, model)
-    await storage.clear_history(user_id)  # история от старой модели больше не совместима с новой сессией
+    await storage.clear_history(user_id)
 
     try:
         await callback.message.edit_text(
@@ -99,8 +196,6 @@ async def cb_model(callback: CallbackQuery) -> None:
             reply_markup=models_keyboard(model),
         )
     except TelegramBadRequest:
-        # сообщение с кнопками старше 48ч (или уже не редактируется) —
-        # состояние всё равно переключено, просто не можем обновить старое сообщение
         logger.info("Не удалось отредактировать сообщение с выбором модели для user_id=%s", user_id)
 
     await callback.answer(f"Модель: {model}")
@@ -109,17 +204,35 @@ async def cb_model(callback: CallbackQuery) -> None:
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
     state = await storage.get(message.from_user.id)
-    await message.answer("Настройки:", reply_markup=settings_keyboard(state.rich_mode))
+    await message.answer(
+        "Настройки:", reply_markup=settings_keyboard(state.rich_mode, state.voice_mode)
+    )
 
 
 @router.callback_query(F.data == "toggle_rich")
 async def cb_toggle_rich(callback: CallbackQuery) -> None:
     rich = await storage.toggle_rich(callback.from_user.id)
+    state = await storage.get(callback.from_user.id)
     try:
-        await callback.message.edit_text("Настройки:", reply_markup=settings_keyboard(rich))
+        await callback.message.edit_text(
+            "Настройки:", reply_markup=settings_keyboard(rich, state.voice_mode)
+        )
     except TelegramBadRequest:
         logger.info("Не удалось отредактировать сообщение настроек для user_id=%s", callback.from_user.id)
     await callback.answer("Rich-режим: " + ("включен" if rich else "выключен"))
+
+
+@router.callback_query(F.data == "toggle_voice")
+async def cb_toggle_voice(callback: CallbackQuery) -> None:
+    voice = await storage.toggle_voice(callback.from_user.id)
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            "Настройки:", reply_markup=settings_keyboard(state.rich_mode, voice)
+        )
+    except TelegramBadRequest:
+        logger.info("Не удалось отредактировать сообщение настроек для user_id=%s", callback.from_user.id)
+    await callback.answer("Голосовые ответы: " + ("включены" if voice else "выключены"))
 
 
 @router.callback_query(F.data == "clear_history")
@@ -133,14 +246,16 @@ async def cmd_limits(message: Message) -> None:
     await message.answer(await _limits_line(message.from_user.id))
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_chat(message: Message) -> None:
+# --- Общий обработчик запросов (текст / фото / документы / голосовые) ---
+
+async def _process_user_turn(
+    message: Message,
+    content_input: Union[str, Sequence[Union[str, types.Part]]],
+    history_text: str,
+    force_voice_reply: bool = False,
+) -> None:
     user_id = message.from_user.id
 
-    # Весь блок check -> Gemini -> hit — под per-user локом: без этого
-    # несколько сообщений подряд от одного юзера могут параллельно пройти
-    # check() как allowed=True (hit() пишется только после ответа Gemini),
-    # и лимит по факту обходится всплеском сообщений. См. locks.py.
     async with user_locks.get(user_id):
         limit_status = await limiter.check(user_id)
         if not limit_status.allowed:
@@ -152,52 +267,122 @@ async def handle_chat(message: Message) -> None:
             return
 
         state = await storage.get(user_id)
-        await message.bot.send_chat_action(message.chat.id, "typing")
+        action = (
+            ChatActionSender.record_voice
+            if (state.voice_mode or force_voice_reply)
+            else ChatActionSender.typing
+        )
 
-        try:
-            answer = await gemini_client.ask(state.model, state.history, message.text)
-        except GeminiError as exc:
-            await message.answer(f"⚠️ {exc}")
-            return
-        except Exception:  # noqa: BLE001 — не роняем бота из-за непредвиденной ошибки SDK
-            logger.exception("Unexpected error while calling Gemini API")
-            await message.answer("⚠️ Непредвиденная ошибка при обращении к Gemini API.")
-            return
-
-        await limiter.hit(user_id)
-        await storage.add_turn(user_id, "user", message.text)
-        await storage.add_turn(user_id, "model", answer)
-
-    if state.rich_mode:
-        for chunk_text, chunk_entities in markdown_to_chunks(answer):
+        async with action(bot=message.bot, chat_id=message.chat.id):
             try:
-                await message.answer(chunk_text, entities=chunk_entities)
+                response = await gemini_client.ask(
+                    model=state.model,
+                    history_turns=state.history,
+                    message=content_input,
+                    system_prompt=state.system_prompt,
+                    want_audio=(state.voice_mode or force_voice_reply),
+                )
+            except GeminiError as exc:
+                await message.answer(f"⚠️ {exc}")
+                return
             except Exception:
-                # entities почти никогда не ломаются (в отличие от MarkdownV2/HTML),
-                # но на всякий случай подстраховываемся обычным текстом
-                logger.warning("Falling back to plain text for a chunk that failed to send with entities")
-                await message.answer(chunk_text)
-    else:
-        for chunk in split_plain_text(answer):
-            await message.answer(chunk)
+                logger.exception("Unexpected error while calling Gemini API")
+                await message.answer("⚠️ Непредвиденная ошибка при обращении к Gemini API.")
+                return
 
-    await message.answer(await _limits_line(user_id))
+            await limiter.hit(user_id)
+            await storage.add_turn(user_id, "user", history_text)
+            if response.text:
+                await storage.add_turn(user_id, "model", response.text)
+
+        await _send_response(
+            message=message,
+            state=state,
+            response=response,
+            user_id=user_id,
+            force_voice=force_voice_reply,
+        )
 
 
-# --- Inline mode ---------------------------------------------------------
-# Работает в ЛЮБОМ чате без добавления бота туда: @botusername запрос в поле
-# ввода -> выпадающий список результатов -> тап вставляет ответ как обычное
-# сообщение ("via @botusername"). Требует /setinline в BotFather. У этого
-# режима нет продолжения диалога в том чате (бот его не видит) и нет
-# смысла тащить туда rich-режим на несколько чанков — можно вставить только
-# ОДНО сообщение, поэтому длинные ответы обрезаются по UTF-16 (см.
-# formatting.utf16_len) с пометкой, а не бьются на чанки как в обычном чате.
-#
-# Общее с обычным чатом: тот же storage (история/модель), тот же rate
-# limiter и тот же per-user lock — это тот же самый юзер, просто из другого
-# интерфейса, так что диалог из ЛС и из inline расходует общий лимит и
-# продолжает одну и ту же историю.
-INLINE_ANSWER_LIMIT = 4000  # с запасом от реального лимита Telegram-сообщения в 4096 UTF-16 юнитов
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_text(message: Message) -> None:
+    await _process_user_turn(
+        message=message,
+        content_input=message.text,
+        history_text=message.text,
+        force_voice_reply=False,
+    )
+
+
+@router.message(F.photo)
+async def handle_photo(message: Message) -> None:
+    photo = message.photo[-1]
+    prompt_text = message.caption or "Опиши подробно, что изображено на этом фото."
+
+    file_io = io.BytesIO()
+    await message.bot.download(photo.file_id, destination=file_io)
+    image_bytes = file_io.getvalue()
+
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+    content_input = [image_part, prompt_text]
+    history_text = f"[Фото] {prompt_text}"
+
+    await _process_user_turn(
+        message=message,
+        content_input=content_input,
+        history_text=history_text,
+        force_voice_reply=False,
+    )
+
+
+@router.message(F.voice | F.audio)
+async def handle_voice(message: Message) -> None:
+    media = message.voice or message.audio
+    mime_type = media.mime_type or ("audio/ogg" if message.voice else "audio/mp3")
+    prompt_text = message.caption or "Ответь на аудиосообщение."
+
+    file_io = io.BytesIO()
+    await message.bot.download(media.file_id, destination=file_io)
+    audio_bytes = file_io.getvalue()
+
+    audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+    content_input = [audio_part, prompt_text]
+    history_text = f"[Голосовое сообщение] {prompt_text}"
+
+    # Если пользователь прислал голосовое — отвечаем голосом
+    await _process_user_turn(
+        message=message,
+        content_input=content_input,
+        history_text=history_text,
+        force_voice_reply=True,
+    )
+
+
+@router.message(F.document)
+async def handle_document(message: Message) -> None:
+    doc = message.document
+    mime_type = doc.mime_type or "application/pdf"
+    prompt_text = message.caption or f"Проанализируй документ '{doc.file_name or 'файл'}'."
+
+    file_io = io.BytesIO()
+    await message.bot.download(doc.file_id, destination=file_io)
+    doc_bytes = file_io.getvalue()
+
+    doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=mime_type)
+    content_input = [doc_part, prompt_text]
+    history_text = f"[Документ {doc.file_name or ''}] {prompt_text}"
+
+    await _process_user_turn(
+        message=message,
+        content_input=content_input,
+        history_text=history_text,
+        force_voice_reply=False,
+    )
+
+
+# --- Inline mode ---
+
+INLINE_ANSWER_LIMIT = 4000
 
 
 def _inline_result(result_id: str, title: str, text: str) -> InlineQueryResultArticle:
@@ -234,7 +419,13 @@ async def handle_inline(query: InlineQuery) -> None:
         if not limit_status.allowed:
             wait_seconds = int(limit_status.retry_after) + 1
             await query.answer(
-                results=[_inline_result(result_id, "⏳ Лимит запросов исчерпан", f"Попробуй снова через {wait_seconds} сек.")],
+                results=[
+                    _inline_result(
+                        result_id,
+                        "⏳ Лимит запросов исчерпан",
+                        f"Попробуй снова через {wait_seconds} сек.",
+                    )
+                ],
                 cache_time=0,
                 is_personal=True,
             )
@@ -243,7 +434,13 @@ async def handle_inline(query: InlineQuery) -> None:
         state = await storage.get(user_id)
 
         try:
-            answer = await gemini_client.ask(state.model, state.history, text)
+            response = await gemini_client.ask(
+                model=state.model,
+                history_turns=state.history,
+                message=text,
+                system_prompt=state.system_prompt,
+                want_audio=False,
+            )
         except GeminiError as exc:
             await query.answer(
                 results=[_inline_result(result_id, "⚠️ Ошибка Gemini", str(exc))],
@@ -251,10 +448,16 @@ async def handle_inline(query: InlineQuery) -> None:
                 is_personal=True,
             )
             return
-        except Exception:  # noqa: BLE001 — та же логика, что и в handle_chat
+        except Exception:
             logger.exception("Unexpected error while calling Gemini API (inline)")
             await query.answer(
-                results=[_inline_result(result_id, "⚠️ Непредвиденная ошибка", "Ошибка при обращении к Gemini API.")],
+                results=[
+                    _inline_result(
+                        result_id,
+                        "⚠️ Непредвиденная ошибка",
+                        "Ошибка при обращении к Gemini API.",
+                    )
+                ],
                 cache_time=0,
                 is_personal=True,
             )
@@ -262,16 +465,20 @@ async def handle_inline(query: InlineQuery) -> None:
 
         await limiter.hit(user_id)
         await storage.add_turn(user_id, "user", text)
-        await storage.add_turn(user_id, "model", answer)
+        if response.text:
+            await storage.add_turn(user_id, "model", response.text)
 
-    display_answer = answer
-    title = answer.replace("\n", " ")[:80] or "Ответ"
-    if utf16_len(answer) > INLINE_ANSWER_LIMIT:
-        cut = find_utf16_cut(answer, INLINE_ANSWER_LIMIT)
-        display_answer = answer[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше в личку боту)"
+    display_answer = response.text or "Готово."
+    title = display_answer.replace("\n", " ")[:80] or "Ответ"
+    if utf16_len(display_answer) > INLINE_ANSWER_LIMIT:
+        cut = find_utf16_cut(display_answer, INLINE_ANSWER_LIMIT)
+        display_answer = (
+            display_answer[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше в личку боту)"
+        )
 
     await query.answer(
         results=[_inline_result(result_id, title, display_answer)],
         cache_time=0,
         is_personal=True,
     )
+

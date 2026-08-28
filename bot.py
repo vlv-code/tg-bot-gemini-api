@@ -3,9 +3,21 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommand
 
 from config import settings
 from handlers import router, storage
+
+# Меню команд в интерфейсе Telegram (кнопка "/" рядом с полем ввода).
+# Список должен соответствовать реальным хендлерам в handlers.py.
+BOT_COMMANDS = [
+    BotCommand(command="start", description="Начать / информация о боте"),
+    BotCommand(command="model", description="Выбрать модель Gemini"),
+    BotCommand(command="settings", description="Rich-режим, голос, очистка истории"),
+    BotCommand(command="prompt", description="Посмотреть/задать system prompt"),
+    BotCommand(command="tts", description="Озвучить текст голосом"),
+    BotCommand(command="limits", description="Остаток лимитов запросов"),
+]
 
 
 async def main() -> None:
@@ -20,11 +32,18 @@ async def main() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
 
+    await bot.set_my_commands(BOT_COMMANDS)
+    logging.info("Меню команд успешно зарегистрировано в Telegram")
+
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Бот запущен, доступные модели: %s", settings.available_models)
-    await dispatcher.start_polling(bot)
 
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        await storage.close()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+

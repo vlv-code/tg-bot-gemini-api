@@ -1,12 +1,13 @@
 """Асинхронное хранилище на базе aiosqlite (SQLite).
 
-Сохраняет состояние пользователя (выбранную модель, rich-режим,
-голосовой режим, индивидуальный system prompt) и историю диалогов
-в файле базы данных SQLite.
+Использует переиспользуемое постоянное соединение, WAL-режим для
+конкурентной работы без блокировок и быстрый INSERT OR IGNORE вместо
+лишних SELECT-запросов.
 """
 
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 import aiosqlite
 
@@ -31,15 +32,24 @@ class UserStorage:
         self._db_path = db_path
         self._default_model = default_model
         self._max_history = max_history
+        self._db: Optional[aiosqlite.Connection] = None
 
     async def init_db(self) -> None:
-        """Инициализирует базу данных и создаёт таблицы."""
+        """Инициализирует постоянное соединение с базой данных, WAL-режим и таблицы."""
         dirname = os.path.dirname(self._db_path)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
 
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
+        if self._db is None:
+            self._db = await aiosqlite.connect(self._db_path)
+            self._db.row_factory = aiosqlite.Row
+
+            # WAL режим и таймаут ожидания лока для параллельной работы хендлеров
+            await self._db.execute("PRAGMA journal_mode = WAL;")
+            await self._db.execute("PRAGMA synchronous = NORMAL;")
+            await self._db.execute("PRAGMA busy_timeout = 5000;")
+
+            await self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -51,7 +61,7 @@ class UserStorage:
                 )
                 """
             )
-            await db.execute(
+            await self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,128 +72,139 @@ class UserStorage:
                 )
                 """
             )
-            await db.execute(
+            await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_user_id ON history (user_id, id)"
             )
-            await db.commit()
+            await self._db.commit()
+
+    async def close(self) -> None:
+        """Закрывает постоянное соединение с базой данных."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
+
+    async def _ensure_db(self) -> aiosqlite.Connection:
+        if self._db is None:
+            await self.init_db()
+        return self._db
+
+    async def _ensure_user(self, db: aiosqlite.Connection, user_id: int) -> None:
+        """Гарантирует существование строки пользователя без лишней выборки."""
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt)
+            VALUES (?, ?, 1, 0, '')
+            """,
+            (user_id, self._default_model),
+        )
 
     async def get(self, user_id: int) -> UserState:
         """Получает состояние пользователя и последние сообщения истории."""
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT model, rich_mode, voice_mode, system_prompt FROM users WHERE user_id = ?",
-                (user_id,),
-            )
-            row = await cursor.fetchone()
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
 
-            if row is None:
-                await db.execute(
-                    """
-                    INSERT INTO users (user_id, model, rich_mode, voice_mode, system_prompt)
-                    VALUES (?, ?, 1, 0, '')
-                    """,
-                    (user_id, self._default_model),
-                )
-                await db.commit()
-                model = self._default_model
-                rich_mode = True
-                voice_mode = False
-                system_prompt = ""
-            else:
-                model = row["model"]
-                rich_mode = bool(row["rich_mode"])
-                voice_mode = bool(row["voice_mode"])
-                system_prompt = row["system_prompt"] or ""
+        cursor = await db.execute(
+            "SELECT model, rich_mode, voice_mode, system_prompt FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
 
-            cursor = await db.execute(
-                """
-                SELECT role, text FROM (
-                    SELECT id, role, text FROM history
-                    WHERE user_id = ?
-                    ORDER BY id DESC
-                    LIMIT ?
-                ) ORDER BY id ASC
-                """,
-                (user_id, self._max_history),
-            )
-            rows = await cursor.fetchall()
-            history = [Turn(role=r["role"], text=r["text"]) for r in rows]
+        model = row["model"]
+        rich_mode = bool(row["rich_mode"])
+        voice_mode = bool(row["voice_mode"])
+        system_prompt = row["system_prompt"] or ""
 
-            return UserState(
-                model=model,
-                rich_mode=rich_mode,
-                voice_mode=voice_mode,
-                system_prompt=system_prompt,
-                history=history,
-            )
+        cursor = await db.execute(
+            """
+            SELECT role, text FROM (
+                SELECT id, role, text FROM history
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            ) ORDER BY id ASC
+            """,
+            (user_id, self._max_history),
+        )
+        rows = await cursor.fetchall()
+        history = [Turn(role=r["role"], text=r["text"]) for r in rows]
+
+        return UserState(
+            model=model,
+            rich_mode=rich_mode,
+            voice_mode=voice_mode,
+            system_prompt=system_prompt,
+            history=history,
+        )
 
     async def set_model(self, user_id: int, model: str) -> None:
-        await self.get(user_id)
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "UPDATE users SET model = ? WHERE user_id = ?",
-                (model, user_id),
-            )
-            await db.commit()
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "UPDATE users SET model = ? WHERE user_id = ?",
+            (model, user_id),
+        )
+        await db.commit()
 
     async def toggle_rich(self, user_id: int) -> bool:
-        state = await self.get(user_id)
-        new_val = not state.rich_mode
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "UPDATE users SET rich_mode = ? WHERE user_id = ?",
-                (1 if new_val else 0, user_id),
-            )
-            await db.commit()
-        return new_val
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "UPDATE users SET rich_mode = CASE WHEN rich_mode = 1 THEN 0 ELSE 1 END WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+        cursor = await db.execute("SELECT rich_mode FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return bool(row["rich_mode"])
 
     async def toggle_voice(self, user_id: int) -> bool:
-        state = await self.get(user_id)
-        new_val = not state.voice_mode
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "UPDATE users SET voice_mode = ? WHERE user_id = ?",
-                (1 if new_val else 0, user_id),
-            )
-            await db.commit()
-        return new_val
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "UPDATE users SET voice_mode = CASE WHEN voice_mode = 1 THEN 0 ELSE 1 END WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+        cursor = await db.execute("SELECT voice_mode FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return bool(row["voice_mode"])
 
     async def set_system_prompt(self, user_id: int, prompt: str) -> None:
-        await self.get(user_id)
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "UPDATE users SET system_prompt = ? WHERE user_id = ?",
-                (prompt, user_id),
-            )
-            await db.commit()
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "UPDATE users SET system_prompt = ? WHERE user_id = ?",
+            (prompt, user_id),
+        )
+        await db.commit()
 
     async def add_turn(self, user_id: int, role: str, text: str) -> None:
-        await self.get(user_id)
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "INSERT INTO history (user_id, role, text) VALUES (?, ?, ?)",
-                (user_id, role, text),
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "INSERT INTO history (user_id, role, text) VALUES (?, ?, ?)",
+            (user_id, role, text),
+        )
+        await db.execute(
+            """
+            DELETE FROM history
+            WHERE user_id = ? AND id NOT IN (
+                SELECT id FROM history
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
             )
-            await db.execute(
-                """
-                DELETE FROM history
-                WHERE user_id = ? AND id NOT IN (
-                    SELECT id FROM history
-                    WHERE user_id = ?
-                    ORDER BY id DESC
-                    LIMIT ?
-                )
-                """,
-                (user_id, user_id, self._max_history),
-            )
-            await db.commit()
+            """,
+            (user_id, user_id, self._max_history),
+        )
+        await db.commit()
 
     async def clear_history(self, user_id: int) -> None:
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "DELETE FROM history WHERE user_id = ?",
-                (user_id,),
-            )
-            await db.commit()
+        db = await self._ensure_db()
+        await db.execute(
+            "DELETE FROM history WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+
 

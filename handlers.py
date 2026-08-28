@@ -626,6 +626,43 @@ async def _process_user_turn(
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message) -> None:
     text = message.text
+
+    # 1. Если пользователь ответил текстом на сообщение с фото или документом-картинкой
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.photo:
+            photo = replied.photo[-1]
+            file_io = io.BytesIO()
+            await message.bot.download(photo.file_id, destination=file_io)
+            image_bytes = file_io.getvalue()
+            image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+            content_input = [image_part, text]
+            history_text = f"[Фото из ответа] {text}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                force_voice_reply=False,
+            )
+            return
+
+        if replied.document and (replied.document.mime_type or "").startswith("image/"):
+            doc = replied.document
+            file_io = io.BytesIO()
+            await message.bot.download(doc.file_id, destination=file_io)
+            doc_bytes = file_io.getvalue()
+            doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=doc.mime_type or "image/jpeg")
+            content_input = [doc_part, text]
+            history_text = f"[Изображение-документ из ответа] {text}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                force_voice_reply=False,
+            )
+            return
+
+    # 2. Если в тексте есть прямая ссылка на изображение
     url_match = URL_REGEX.search(text)
     if url_match:
         url = url_match.group(0)
@@ -644,6 +681,7 @@ async def handle_text(message: Message) -> None:
             )
             return
 
+    # 3. Обычный текстовый запрос
     await _process_user_turn(
         message=message,
         content_input=message.text,

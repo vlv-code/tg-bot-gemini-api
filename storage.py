@@ -45,7 +45,7 @@ class UserStorage:
             if self._db is not None:
                 return
 
-            dirname = os.path.dirname(self._db_path)
+            dirname = os.path.dirname(os.path.abspath(self._db_path))
             if dirname:
                 os.makedirs(dirname, exist_ok=True)
 

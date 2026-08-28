@@ -21,7 +21,16 @@ from google.genai import types
 from config import settings
 from formatting import find_utf16_cut, markdown_to_chunks, split_plain_text, utf16_len
 from gemini_client import GeminiError, GeminiResponse, build_gemini_client
-from keyboards import models_keyboard, settings_keyboard
+from keyboards import (
+    limits_keyboard,
+    main_menu_keyboard,
+    models_keyboard,
+    prompt_keyboard,
+    settings_keyboard,
+    tts_menu_keyboard,
+    tts_models_keyboard,
+    tts_voices_keyboard,
+)
 from locks import UserLocks
 from middlewares import AccessMiddleware
 from rate_limiter import RateLimiter
@@ -38,6 +47,8 @@ storage = UserStorage(
     db_path=settings.db_path,
     default_model=settings.default_model,
     max_history=settings.max_history_messages,
+    default_tts_model=settings.tts_model,
+    default_tts_voice=settings.tts_voice,
 )
 limiter = RateLimiter(
     per_minute=settings.rate_limit_per_minute, per_day=settings.rate_limit_per_day
@@ -54,6 +65,53 @@ user_locks = UserLocks()
 async def _limits_line(user_id: int) -> str:
     status = await limiter.status(user_id)
     return f"📊 {status.used_minute}/{status.limit_minute} в минуту · {status.used_day}/{status.limit_day} сегодня"
+
+
+def _render_main_menu_text(state: UserState) -> str:
+    rich_str = "вкл ✅" if state.rich_mode else "выкл ❌"
+    voice_str = "вкл 🎙" if state.voice_mode else "выкл 🔇"
+    prompt_status = "индивидуальный" if state.system_prompt else "по умолчанию"
+    history_count = len(state.history)
+
+    return (
+        "🤖 <b>Главное меню Gemini Bot</b>\n\n"
+        f"• <b>Основная модель:</b> <code>{html.escape(state.model)}</code>\n"
+        f"• <b>Озвучка (TTS):</b> <code>{html.escape(state.tts_model)}</code>\n"
+        f"• <b>Голос синтеза:</b> <code>{html.escape(state.tts_voice)}</code>\n"
+        f"• <b>Голосовые ответы:</b> {voice_str}\n"
+        f"• <b>Rich-разметка:</b> {rich_str}\n"
+        f"• <b>Системный промпт:</b> {prompt_status}\n"
+        f"• <b>Контекст диалога:</b> {history_count} реплик в памяти\n\n"
+        "<i>Используйте кнопки ниже для быстрой настройки без спама в чате:</i>"
+    )
+
+
+def _render_tts_menu_text(state: UserState) -> str:
+    voice_str = "включены 🎙" if state.voice_mode else "выключены 🔇"
+    return (
+        "🎙 <b>Настройки озвучки и синтеза речи (TTS)</b>\n\n"
+        f"• <b>Текущая TTS модель:</b> <code>{html.escape(state.tts_model)}</code>\n"
+        f"• <b>Текущий голос:</b> <code>{html.escape(state.tts_voice)}</code>\n"
+        f"• <b>Авто-ответы голосовыми:</b> {voice_str}\n\n"
+        "<i>Выберите параметр для изменения:</i>"
+    )
+
+
+def _render_prompt_menu_text(state: UserState) -> str:
+    effective = (
+        state.system_prompt
+        or settings.system_prompt
+        or "(не задан — поведение Gemini по умолчанию)"
+    )
+    is_custom = bool(state.system_prompt)
+    status = " (индивидуальный)" if is_custom else " (глобальный дефолт)"
+
+    return (
+        f"📝 <b>Системный промпт</b>{status}:\n\n"
+        f"<code>{html.escape(effective)}</code>\n\n"
+        "• Чтобы задать новый промпт: отправьте команду <code>/prompt текст промпта</code>\n"
+        "• Чтобы сбросить к дефолту: нажмите кнопку ниже или <code>/prompt reset</code>"
+    )
 
 
 async def _send_response(
@@ -86,22 +144,36 @@ async def _send_response(
     await message.answer(await _limits_line(user_id))
 
 
+# --- Команды бота ---
+
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+@router.message(Command("menu"))
+async def cmd_menu(message: Message) -> None:
     state = await storage.get(message.from_user.id)
     await message.answer(
-        "Привет! Я бот-ассистент на базе Google Gemini API.\n\n"
-        f"Текущая модель: <b>{html.escape(state.model)}</b>\n\n"
-        "<b>Команды:</b>\n"
-        "/model — выбрать модель Gemini\n"
-        "/settings — rich-режим, голосовые ответы и очистка истории\n"
-        "/prompt — посмотреть или задать свой system prompt\n"
-        "/tts &lt;текст&gt; — озвучить текст голосом\n"
-        "/limits — статистика и остаток лимитов\n\n"
-        "<b>Возможности:</b>\n"
-        "• Отправь текст, фото, документ (PDF) или голосовое сообщение — бот поймёт их!\n"
-        "• Используй inline-режим в любом чате: <code>@username_бота вопрос</code>.",
+        _render_main_menu_text(state),
         parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(Command("model"))
+async def cmd_model(message: Message) -> None:
+    state = await storage.get(message.from_user.id)
+    await message.answer(
+        f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
+        parse_mode="HTML",
+        reply_markup=models_keyboard(state.model),
+    )
+
+
+@router.message(Command("settings"))
+async def cmd_settings(message: Message) -> None:
+    state = await storage.get(message.from_user.id)
+    await message.answer(
+        "⚙️ <b>Параметры чата и ответов:</b>",
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(state.rich_mode, state.voice_mode),
     )
 
 
@@ -112,18 +184,10 @@ async def cmd_prompt(message: Message) -> None:
     args = message.text.split(maxsplit=1)
 
     if len(args) == 1:
-        effective = (
-            state.system_prompt
-            or settings.system_prompt
-            or "(не задан — поведение Gemini по умолчанию)"
-        )
-        is_custom = bool(state.system_prompt)
-        status = " (индивидуальный)" if is_custom else " (глобальный дефолт)"
         await message.answer(
-            f"Текущий system prompt{status}:\n\n<code>{html.escape(effective)}</code>\n\n"
-            "Чтобы изменить: <code>/prompt текст промпта</code>\n"
-            "Чтобы сбросить к дефолту: <code>/prompt reset</code>",
+            _render_prompt_menu_text(state),
             parse_mode="HTML",
+            reply_markup=prompt_keyboard(),
         )
         return
 
@@ -140,7 +204,11 @@ async def cmd_prompt(message: Message) -> None:
 async def cmd_tts(message: Message) -> None:
     args = message.text.split(maxsplit=1)
     if len(args) == 1:
-        await message.answer("Использование: <code>/tts Текст для озвучки</code>", parse_mode="HTML")
+        await message.answer(
+            "Использование: <code>/tts Текст для озвучки</code>\n\n"
+            "Либо настройте параметры озвучки в меню: /menu",
+            parse_mode="HTML",
+        )
         return
 
     text_to_speak = args[1].strip()
@@ -156,9 +224,15 @@ async def cmd_tts(message: Message) -> None:
             )
             return
 
+        state = await storage.get(user_id)
+
         async with ChatActionSender.record_voice(bot=message.bot, chat_id=message.chat.id):
             try:
-                audio_bytes = await gemini_client.generate_speech(text_to_speak)
+                audio_bytes = await gemini_client.generate_speech(
+                    text=text_to_speak,
+                    voice_name=state.tts_voice,
+                    model=state.tts_model,
+                )
             except GeminiError as exc:
                 await message.answer(f"⚠️ {exc}")
                 return
@@ -173,14 +247,49 @@ async def cmd_tts(message: Message) -> None:
         await message.answer_voice(voice_file)
 
 
-@router.message(Command("model"))
-async def cmd_model(message: Message) -> None:
-    state = await storage.get(message.from_user.id)
-    await message.answer("Выбери модель Gemini:", reply_markup=models_keyboard(state.model))
+@router.message(Command("limits"))
+async def cmd_limits(message: Message) -> None:
+    user_id = message.from_user.id
+    status_line = await _limits_line(user_id)
+    await message.answer(
+        f"📊 <b>Текущие лимиты запросов:</b>\n\n{status_line}",
+        parse_mode="HTML",
+        reply_markup=limits_keyboard(),
+    )
 
 
-@router.callback_query(F.data.startswith("model:"))
-async def cb_model(callback: CallbackQuery) -> None:
+# --- Callback-хендлеры навигации по единому меню ---
+
+@router.callback_query(F.data == "menu:main")
+async def cb_menu_main(callback: CallbackQuery) -> None:
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            _render_main_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:model")
+async def cb_menu_model(callback: CallbackQuery) -> None:
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
+            parse_mode="HTML",
+            reply_markup=models_keyboard(state.model),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_model:") | F.data.startswith("model:"))
+async def cb_set_model(callback: CallbackQuery) -> None:
     model = callback.data.split(":", 1)[1]
     if model not in settings.available_models:
         await callback.answer("Неизвестная модель", show_alert=True)
@@ -192,22 +301,118 @@ async def cb_model(callback: CallbackQuery) -> None:
 
     try:
         await callback.message.edit_text(
-            f"Модель переключена на: <b>{html.escape(model)}</b>\n(история диалога очищена)",
+            f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(model)}</code>):",
             parse_mode="HTML",
             reply_markup=models_keyboard(model),
         )
     except TelegramBadRequest:
-        logger.info("Не удалось отредактировать сообщение с выбором модели для user_id=%s", user_id)
+        pass
+    await callback.answer(f"Модель переключена на {model} (контекст очищен)")
 
-    await callback.answer(f"Модель: {model}")
+
+@router.callback_query(F.data == "menu:tts")
+async def cb_menu_tts(callback: CallbackQuery) -> None:
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            _render_tts_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=tts_menu_keyboard(state.tts_model, state.tts_voice, state.voice_mode),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
-@router.message(Command("settings"))
-async def cmd_settings(message: Message) -> None:
-    state = await storage.get(message.from_user.id)
-    await message.answer(
-        "Настройки:", reply_markup=settings_keyboard(state.rich_mode, state.voice_mode)
-    )
+@router.callback_query(F.data == "menu:tts_models")
+async def cb_menu_tts_models(callback: CallbackQuery) -> None:
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            f"🎙 Выберите модель для синтеза речи TTS (текущая: <code>{html.escape(state.tts_model)}</code>):",
+            parse_mode="HTML",
+            reply_markup=tts_models_keyboard(state.tts_model),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_tts_model:"))
+async def cb_set_tts_model(callback: CallbackQuery) -> None:
+    model = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    await storage.set_tts_model(user_id, model)
+
+    try:
+        await callback.message.edit_text(
+            f"🎙 Выберите модель для синтеза речи TTS (текущая: <code>{html.escape(model)}</code>):",
+            parse_mode="HTML",
+            reply_markup=tts_models_keyboard(model),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer(f"TTS модель: {model}")
+
+
+@router.callback_query(F.data == "menu:tts_voices")
+async def cb_menu_tts_voices(callback: CallbackQuery) -> None:
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            f"🗣 Выберите голос для озвучки (текущий: <code>{html.escape(state.tts_voice)}</code>):",
+            parse_mode="HTML",
+            reply_markup=tts_voices_keyboard(state.tts_voice),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_tts_voice:"))
+async def cb_set_tts_voice(callback: CallbackQuery) -> None:
+    voice = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    await storage.set_tts_voice(user_id, voice)
+
+    try:
+        await callback.message.edit_text(
+            f"🗣 Выберите голос для озвучки (текущий: <code>{html.escape(voice)}</code>):",
+            parse_mode="HTML",
+            reply_markup=tts_voices_keyboard(voice),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer(f"Голос озвучки: {voice}")
+
+
+@router.callback_query(F.data == "toggle_voice_tts")
+async def cb_toggle_voice_tts(callback: CallbackQuery) -> None:
+    voice = await storage.toggle_voice(callback.from_user.id)
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            _render_tts_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=tts_menu_keyboard(state.tts_model, state.tts_voice, voice),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Голосовые ответы: " + ("включены" if voice else "выключены"))
+
+
+@router.callback_query(F.data == "menu:settings")
+async def cb_menu_settings(callback: CallbackQuery) -> None:
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            "⚙️ <b>Параметры чата и ответов:</b>",
+            parse_mode="HTML",
+            reply_markup=settings_keyboard(state.rich_mode, state.voice_mode),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
 @router.callback_query(F.data == "toggle_rich")
@@ -216,10 +421,12 @@ async def cb_toggle_rich(callback: CallbackQuery) -> None:
     state = await storage.get(callback.from_user.id)
     try:
         await callback.message.edit_text(
-            "Настройки:", reply_markup=settings_keyboard(rich, state.voice_mode)
+            "⚙️ <b>Параметры чата и ответов:</b>",
+            parse_mode="HTML",
+            reply_markup=settings_keyboard(rich, state.voice_mode),
         )
     except TelegramBadRequest:
-        logger.info("Не удалось отредактировать сообщение настроек для user_id=%s", callback.from_user.id)
+        pass
     await callback.answer("Rich-режим: " + ("включен" if rich else "выключен"))
 
 
@@ -229,22 +436,74 @@ async def cb_toggle_voice(callback: CallbackQuery) -> None:
     state = await storage.get(callback.from_user.id)
     try:
         await callback.message.edit_text(
-            "Настройки:", reply_markup=settings_keyboard(state.rich_mode, voice)
+            "⚙️ <b>Параметры чата и ответов:</b>",
+            parse_mode="HTML",
+            reply_markup=settings_keyboard(state.rich_mode, voice),
         )
     except TelegramBadRequest:
-        logger.info("Не удалось отредактировать сообщение настроек для user_id=%s", callback.from_user.id)
+        pass
     await callback.answer("Голосовые ответы: " + ("включены" if voice else "выключены"))
 
 
-@router.callback_query(F.data == "clear_history")
+@router.callback_query(F.data == "clear_history" | F.data == "menu:clear_hist")
 async def cb_clear_history(callback: CallbackQuery) -> None:
     await storage.clear_history(callback.from_user.id)
+    state = await storage.get(callback.from_user.id)
+    # Если нажали из главного меню, обновим счетчик в главном меню
+    if callback.data == "menu:clear_hist":
+        try:
+            await callback.message.edit_text(
+                _render_main_menu_text(state),
+                parse_mode="HTML",
+                reply_markup=main_menu_keyboard(),
+            )
+        except TelegramBadRequest:
+            pass
     await callback.answer("История диалога очищена ✅")
 
 
-@router.message(Command("limits"))
-async def cmd_limits(message: Message) -> None:
-    await message.answer(await _limits_line(message.from_user.id))
+@router.callback_query(F.data == "menu:prompt")
+async def cb_menu_prompt(callback: CallbackQuery) -> None:
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            _render_prompt_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=prompt_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "reset_prompt")
+async def cb_reset_prompt(callback: CallbackQuery) -> None:
+    await storage.set_system_prompt(callback.from_user.id, "")
+    state = await storage.get(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            _render_prompt_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=prompt_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Промпт сброшен к дефолтному ✅")
+
+
+@router.callback_query(F.data == "menu:limits" | F.data == "refresh_limits")
+async def cb_menu_limits(callback: CallbackQuery) -> None:
+    status_line = await _limits_line(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            f"📊 <b>Текущие лимиты запросов:</b>\n\n{status_line}",
+            parse_mode="HTML",
+            reply_markup=limits_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Лимиты обновлены")
+
 
 
 # --- Общий обработчик запросов (текст / фото / документы / голосовые) ---
@@ -282,6 +541,7 @@ async def _process_user_turn(
                     message=content_input,
                     system_prompt=state.system_prompt,
                     want_audio=(state.voice_mode or force_voice_reply),
+                    voice_name=state.tts_voice,
                 )
             except GeminiError as exc:
                 await message.answer(f"⚠️ {exc}")

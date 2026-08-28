@@ -25,14 +25,25 @@ class UserState:
     rich_mode: bool = True
     voice_mode: bool = False
     system_prompt: str = ""
+    tts_model: str = "gemini-3.1-flash-tts-preview"
+    tts_voice: str = "Aoede"
     history: list[Turn] = field(default_factory=list)
 
 
 class UserStorage:
-    def __init__(self, db_path: str, default_model: str, max_history: int) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        default_model: str,
+        max_history: int,
+        default_tts_model: str = "gemini-3.1-flash-tts-preview",
+        default_tts_voice: str = "Aoede",
+    ) -> None:
         self._db_path = db_path
         self._default_model = default_model
         self._max_history = max_history
+        self._default_tts_model = default_tts_model
+        self._default_tts_voice = default_tts_voice
         self._db: Optional[aiosqlite.Connection] = None
         self._init_lock = asyncio.Lock()
 
@@ -65,10 +76,25 @@ class UserStorage:
                     rich_mode INTEGER NOT NULL DEFAULT 1,
                     voice_mode INTEGER NOT NULL DEFAULT 0,
                     system_prompt TEXT NOT NULL DEFAULT '',
+                    tts_model TEXT NOT NULL DEFAULT '',
+                    tts_voice TEXT NOT NULL DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+
+            # Миграция: добавляем tts_model и tts_voice, если их ещё нет в существующей БД
+            cursor = await db.execute("PRAGMA table_info(users)")
+            columns = [row["name"] for row in await cursor.fetchall()]
+            if "tts_model" not in columns:
+                await db.execute(
+                    f"ALTER TABLE users ADD COLUMN tts_model TEXT NOT NULL DEFAULT '{self._default_tts_model}'"
+                )
+            if "tts_voice" not in columns:
+                await db.execute(
+                    f"ALTER TABLE users ADD COLUMN tts_voice TEXT NOT NULL DEFAULT '{self._default_tts_voice}'"
+                )
+
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history (
@@ -103,10 +129,10 @@ class UserStorage:
         """Гарантирует существование строки пользователя без лишней выборки."""
         await db.execute(
             """
-            INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt)
-            VALUES (?, ?, 1, 0, '')
+            INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, tts_model, tts_voice)
+            VALUES (?, ?, 1, 0, '', ?, ?)
             """,
-            (user_id, self._default_model),
+            (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
         )
 
     async def get(self, user_id: int) -> UserState:
@@ -115,7 +141,7 @@ class UserStorage:
         await self._ensure_user(db, user_id)
 
         cursor = await db.execute(
-            "SELECT model, rich_mode, voice_mode, system_prompt FROM users WHERE user_id = ?",
+            "SELECT model, rich_mode, voice_mode, system_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -124,6 +150,8 @@ class UserStorage:
         rich_mode = bool(row["rich_mode"])
         voice_mode = bool(row["voice_mode"])
         system_prompt = row["system_prompt"] or ""
+        tts_model = row["tts_model"] or self._default_tts_model
+        tts_voice = row["tts_voice"] or self._default_tts_voice
 
         cursor = await db.execute(
             """
@@ -144,6 +172,8 @@ class UserStorage:
             rich_mode=rich_mode,
             voice_mode=voice_mode,
             system_prompt=system_prompt,
+            tts_model=tts_model,
+            tts_voice=tts_voice,
             history=history,
         )
 
@@ -153,6 +183,24 @@ class UserStorage:
         await db.execute(
             "UPDATE users SET model = ? WHERE user_id = ?",
             (model, user_id),
+        )
+        await db.commit()
+
+    async def set_tts_model(self, user_id: int, tts_model: str) -> None:
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "UPDATE users SET tts_model = ? WHERE user_id = ?",
+            (tts_model, user_id),
+        )
+        await db.commit()
+
+    async def set_tts_voice(self, user_id: int, voice: str) -> None:
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "UPDATE users SET tts_voice = ? WHERE user_id = ?",
+            (voice, user_id),
         )
         await db.commit()
 

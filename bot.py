@@ -8,15 +8,14 @@ from aiogram.types import BotCommand
 from config import settings
 from handlers import router, storage
 
-# Меню команд в интерфейсе Telegram (кнопка "/" рядом с полем ввода).
-# Список должен соответствовать реальным хендлерам в handlers.py.
 BOT_COMMANDS = [
-    BotCommand(command="start", description="Начать / информация о боте"),
-    BotCommand(command="model", description="Выбрать модель Gemini"),
-    BotCommand(command="settings", description="Rich-режим, голос, очистка истории"),
-    BotCommand(command="prompt", description="Посмотреть/задать system prompt"),
-    BotCommand(command="tts", description="Озвучить текст голосом"),
-    BotCommand(command="limits", description="Остаток лимитов запросов"),
+    BotCommand(command="menu", description="Главное меню настроек и моделей"),
+    BotCommand(command="start", description="Запустить бота и открыть меню"),
+    BotCommand(command="model", description="Выбрать основную модель Gemini"),
+    BotCommand(command="settings", description="Параметры чата и голосовые ответы"),
+    BotCommand(command="prompt", description="Настроить системный промпт"),
+    BotCommand(command="tts", description="Озвучить текст голосовым сообщением"),
+    BotCommand(command="limits", description="Проверить остаток лимитов запросов"),
 ]
 
 

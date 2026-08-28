@@ -43,9 +43,21 @@ class Settings:
 
     # Модель для TTS генерации речи (gemini-3.1-flash-tts-preview)
     tts_model: str = os.getenv("TTS_MODEL", "gemini-3.1-flash-tts-preview")
+    available_tts_models: list[str] = field(
+        default_factory=lambda: _get_list(
+            "AVAILABLE_TTS_MODELS",
+            "gemini-3.1-flash-tts-preview,gemini-2.5-flash-preview-tts,gemini-2.5-flash",
+        )
+    )
 
     # Пресет голоса для Gemini Audio / TTS (Puck, Charon, Kore, Fenrir, Aoede)
     tts_voice: str = os.getenv("TTS_VOICE", "Aoede")
+    available_voices: list[str] = field(
+        default_factory=lambda: _get_list(
+            "AVAILABLE_VOICES",
+            "Aoede,Kore,Puck,Fenrir,Charon",
+        )
+    )
 
     # System instruction для Gemini — тон/язык/персона ответов. Пусто = без
     # system_instruction вообще (поведение Gemini по умолчанию).

@@ -12,6 +12,8 @@ from typing import Optional
 
 import aiosqlite
 
+from config import settings
+
 
 @dataclass
 class Turn:
@@ -134,6 +136,40 @@ class UserStorage:
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_token_usage_user_time ON token_usage (user_id, created_at)"
+            )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_chats (
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    chat_title TEXT NOT NULL DEFAULT '',
+                    chat_type TEXT NOT NULL DEFAULT 'private',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, chat_id)
+                )
+                """
+            )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS allowed_users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT NOT NULL DEFAULT '',
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    added_by INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
             )
             await db.commit()
 
@@ -289,14 +325,180 @@ class UserStorage:
         )
         await db.commit()
 
-    async def clear_history(self, user_id: int, chat_id: Optional[int] = None) -> None:
-        target_chat_id = chat_id if chat_id is not None else user_id
+    async def track_user_chat(
+        self,
+        user_id: int,
+        chat_id: int,
+        chat_title: str = "",
+        chat_type: str = "private",
+    ) -> None:
+        """Сохраняет или обновляет название и тип чата для пользователя."""
         db = await self._ensure_db()
+        clean_title = chat_title.strip()
+        if not clean_title:
+            clean_title = "Личные сообщения" if chat_id == user_id else f"Чат {chat_id}"
         await db.execute(
-            "DELETE FROM history WHERE chat_id = ? AND user_id = ?",
-            (target_chat_id, user_id),
+            """
+            INSERT INTO user_chats (user_id, chat_id, chat_title, chat_type, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, chat_id) DO UPDATE SET
+                chat_title = excluded.chat_title,
+                chat_type = excluded.chat_type,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (user_id, chat_id, clean_title, chat_type),
         )
         await db.commit()
+
+    async def get_user_chats_with_history(self, user_id: int) -> list[dict]:
+        """Возвращает список всех чатов пользователя, где есть сохранённая история."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            """
+            SELECT 
+                h.chat_id,
+                COALESCE(NULLIF(c.chat_title, ''), CASE WHEN h.chat_id = h.user_id THEN 'Личные сообщения' ELSE 'Чат ' || h.chat_id END) as chat_title,
+                COALESCE(c.chat_type, 'private') as chat_type,
+                COUNT(h.id) as message_count
+            FROM history h
+            LEFT JOIN user_chats c ON h.user_id = c.user_id AND h.chat_id = c.chat_id
+            WHERE h.user_id = ?
+            GROUP BY h.chat_id
+            HAVING COUNT(h.id) > 0
+            ORDER BY MAX(h.id) DESC
+            """,
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "chat_id": int(r["chat_id"]),
+                "chat_title": str(r["chat_title"]),
+                "chat_type": str(r["chat_type"]),
+                "message_count": int(r["message_count"]),
+            }
+            for r in rows
+        ]
+
+    async def clear_history(
+        self, user_id: int, chat_id: Optional[int] = None, all_chats: bool = False
+    ) -> int:
+        """Очищает историю диалога: конкретного чата либо всех чатов пользователя."""
+        db = await self._ensure_db()
+        if all_chats:
+            cursor = await db.execute(
+                "DELETE FROM history WHERE user_id = ?",
+                (user_id,),
+            )
+        else:
+            target_chat_id = chat_id if chat_id is not None else user_id
+            cursor = await db.execute(
+                "DELETE FROM history WHERE chat_id = ? AND user_id = ?",
+                (target_chat_id, user_id),
+            )
+        await db.commit()
+        return cursor.rowcount
+
+    async def is_user_admin(self, user_id: int) -> bool:
+        """Проверяет, является ли пользователь суперадмином или админом в БД."""
+        if user_id in settings.admin_ids:
+            return True
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT is_admin FROM allowed_users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return bool(row and row["is_admin"])
+
+    async def get_whitelist_mode(self) -> bool:
+        """Возвращает статус режима белого списка (True = доступ только разрешённым)."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT value FROM bot_settings WHERE key = 'whitelist_mode'",
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            return row["value"] == "1"
+        # По умолчанию включен, если в .env задан список ALLOWED_USER_IDS
+        return bool(settings.allowed_user_ids)
+
+    async def toggle_whitelist_mode(self) -> bool:
+        """Переключает режим белого списка."""
+        current = await self.get_whitelist_mode()
+        new_val = "0" if current else "1"
+        db = await self._ensure_db()
+        await db.execute(
+            "INSERT INTO bot_settings (key, value) VALUES ('whitelist_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (new_val,),
+        )
+        await db.commit()
+        return new_val == "1"
+
+    async def is_user_allowed(self, user_id: int) -> bool:
+        """Проверяет, разрешён ли доступ пользователю с учётом белого списка."""
+        if await self.is_user_admin(user_id):
+            return True
+        if not await self.get_whitelist_mode():
+            return True
+        if user_id in settings.allowed_user_ids:
+            return True
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT 1 FROM allowed_users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return row is not None
+
+    async def add_allowed_user(
+        self,
+        user_id: int,
+        username: str = "",
+        is_admin: bool = False,
+        added_by: int = 0,
+    ) -> None:
+        """Добавляет пользователя в белый список."""
+        db = await self._ensure_db()
+        await db.execute(
+            """
+            INSERT INTO allowed_users (user_id, username, is_admin, added_by)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = CASE WHEN excluded.username != '' THEN excluded.username ELSE allowed_users.username END,
+                is_admin = excluded.is_admin
+            """,
+            (user_id, username, 1 if is_admin else 0, added_by),
+        )
+        await db.commit()
+
+    async def remove_allowed_user(self, user_id: int) -> bool:
+        """Удаляет пользователя из белого списка."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "DELETE FROM allowed_users WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def list_allowed_users(self) -> list[dict]:
+        """Возвращает список всех разрешённых пользователей."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT user_id, username, is_admin, added_by, created_at FROM allowed_users ORDER BY is_admin DESC, created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "user_id": int(r["user_id"]),
+                "username": str(r["username"] or ""),
+                "is_admin": bool(r["is_admin"]),
+                "added_by": int(r["added_by"] or 0),
+                "created_at": str(r["created_at"]),
+            }
+            for r in rows
+        ]
 
     async def record_token_usage(
         self,

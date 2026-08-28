@@ -3,7 +3,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import settings
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню бота со всеми разделами."""
     buttons = [
         [InlineKeyboardButton(text="🤖 Модель Gemini", callback_data="menu:model")],
@@ -12,6 +12,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📝 Системный промпт", callback_data="menu:prompt")],
         [InlineKeyboardButton(text="📊 Лимиты запросов", callback_data="menu:limits")],
     ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="👑 Панель администратора", callback_data="menu:admin")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -88,6 +90,36 @@ def settings_keyboard(rich_mode: bool, voice_mode: bool = False) -> InlineKeyboa
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def clear_history_chats_keyboard(user_chats: list[dict]) -> InlineKeyboardMarkup:
+    """Клавиатура со списком чатов, где есть сохранённая история."""
+    buttons = []
+    total_messages = sum(c.get("message_count", 0) for c in user_chats)
+
+    for chat in user_chats:
+        chat_id = chat["chat_id"]
+        title = chat.get("chat_title", f"Чат {chat_id}")
+        count = chat.get("message_count", 0)
+        chat_type = chat.get("chat_type", "private")
+        icon = "💬" if chat_type == "private" else "👥"
+
+        title_short = (title[:24] + "…") if len(title) > 25 else title
+        btn_text = f"🗑 {icon} {title_short} ({count} репл.)"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"clear_chat:{chat_id}")])
+
+    if total_messages > 0:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"💥 Очистить во ВСЕХ чатах ({total_messages} репл.)",
+                    callback_data="clear_chat:all",
+                )
+            ]
+        )
+
+    buttons.append([InlineKeyboardButton(text="◀️ Назад к параметрам", callback_data="menu:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def prompt_keyboard() -> InlineKeyboardMarkup:
     """Меню системного промпта."""
     buttons = [
@@ -103,6 +135,40 @@ def limits_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_limits")],
         [InlineKeyboardButton(text="◀️ Назад в главное меню", callback_data="menu:main")],
     ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_panel_keyboard(whitelist_enabled: bool) -> InlineKeyboardMarkup:
+    """Главная панель администратора."""
+    wl_label = "🛡 Белый список: ВКЛ ✅" if whitelist_enabled else "🛡 Белый список: ВЫКЛ ❌"
+    buttons = [
+        [InlineKeyboardButton(text="👥 Список разрешённых юзеров", callback_data="admin:users")],
+        [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="admin:add_user_hint")],
+        [InlineKeyboardButton(text=wl_label, callback_data="admin:toggle_whitelist")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu:main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_users_keyboard(users: list[dict]) -> InlineKeyboardMarkup:
+    """Клавиатура со списком разрешённых пользователей."""
+    buttons = []
+    for u in users:
+        uid = u["user_id"]
+        name = u.get("username") or f"ID {uid}"
+        role_icon = "👑 " if u.get("is_admin") else "👤 "
+        display_name = f"{role_icon}{name} ({uid})"
+        if len(display_name) > 28:
+            display_name = display_name[:27] + "…"
+
+        buttons.append(
+            [
+                InlineKeyboardButton(text=display_name, callback_data=f"admin:user_info:{uid}"),
+                InlineKeyboardButton(text="❌ Удалить", callback_data=f"admin:del_user:{uid}"),
+            ]
+        )
+
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в админку", callback_data="menu:admin")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

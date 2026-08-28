@@ -38,6 +38,16 @@ class Settings:
         default_factory=lambda: [int(x) for x in _get_list("ALLOWED_USER_IDS", "")]
     )
 
+    # Список Telegram user_id администраторов бота (суперадмины)
+    admin_ids: list[int] = field(
+        default_factory=lambda: [
+            int(x) for x in _get_list("ADMIN_IDS", os.getenv("ADMIN_ID", "")) if x
+        ]
+    )
+
+    # Максимальное количество параллельных запросов к Gemini API (глобальная очередь)
+    max_concurrent_requests: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
+
     # Путь к файлу SQLite базы данных
     db_path: str = os.getenv("DB_PATH", "data/bot.db")
 

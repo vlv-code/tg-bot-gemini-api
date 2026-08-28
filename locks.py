@@ -17,6 +17,8 @@ limiter.check() как allowed=True — limiter.hit() пишется тольк�
 
 import asyncio
 from collections import defaultdict
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Callable, Optional
 
 
 class UserLocks:
@@ -25,3 +27,53 @@ class UserLocks:
 
     def get(self, user_id: int) -> asyncio.Lock:
         return self._locks[user_id]
+
+
+class GlobalQueueManager:
+    """Глобальный семафор + трекер очереди ожидания для запросов к Gemini API."""
+
+    def __init__(self, max_concurrent: int = 5) -> None:
+        self.max_concurrent = max_concurrent
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._waiting_count: int = 0
+        self._lock = asyncio.Lock()
+
+    @property
+    def waiting_count(self) -> int:
+        return self._waiting_count
+
+    @asynccontextmanager
+    async def acquire(
+        self,
+        user_id: int,
+        on_waiting: Optional[Callable[[int], Any]] = None,
+    ) -> AsyncIterator[int]:
+        """Захватывает слот в глобальной очереди.
+
+        Если все слоты заняты, вызывает on_waiting(position) с номером позиции в очереди.
+        """
+        async with self._lock:
+            if self._semaphore.locked():
+                self._waiting_count += 1
+                position = self._waiting_count
+                if on_waiting:
+                    try:
+                        res = on_waiting(position)
+                        if asyncio.iscoroutine(res):
+                            await res
+                    except Exception:
+                        pass
+                should_decrement = True
+            else:
+                position = 0
+                should_decrement = False
+
+        try:
+            await self._semaphore.acquire()
+            yield position
+        finally:
+            if should_decrement:
+                async with self._lock:
+                    self._waiting_count = max(0, self._waiting_count - 1)
+            self._semaphore.release()
+

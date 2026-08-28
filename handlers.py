@@ -30,6 +30,9 @@ from config import settings
 from formatting import find_utf16_cut, markdown_to_chunks, split_plain_text, utf16_len
 from gemini_client import GeminiError, GeminiResponse, build_gemini_client
 from keyboards import (
+    admin_panel_keyboard,
+    admin_users_keyboard,
+    clear_history_chats_keyboard,
     limits_keyboard,
     main_menu_keyboard,
     models_keyboard,
@@ -39,7 +42,7 @@ from keyboards import (
     tts_models_keyboard,
     tts_voices_keyboard,
 )
-from locks import UserLocks
+from locks import GlobalQueueManager, UserLocks
 from middlewares import AccessMiddleware
 from rate_limiter import RateLimiter
 from storage import UserState, UserStorage
@@ -66,12 +69,6 @@ async def try_download_image_from_url(url: str) -> Optional[tuple[bytes, str]]:
         pass
     return None
 
-router = Router()
-router.message.outer_middleware(AccessMiddleware())
-router.callback_query.outer_middleware(AccessMiddleware())
-router.inline_query.outer_middleware(AccessMiddleware())
-router.chosen_inline_result.outer_middleware(AccessMiddleware())
-
 storage = UserStorage(
     db_path=settings.db_path,
     default_model=settings.default_model,
@@ -79,6 +76,13 @@ storage = UserStorage(
     default_tts_model=settings.tts_model,
     default_tts_voice=settings.tts_voice,
 )
+
+router = Router()
+router.message.outer_middleware(AccessMiddleware(storage=storage))
+router.callback_query.outer_middleware(AccessMiddleware(storage=storage))
+router.inline_query.outer_middleware(AccessMiddleware(storage=storage))
+router.chosen_inline_result.outer_middleware(AccessMiddleware(storage=storage))
+
 limiter = RateLimiter(
     per_minute=settings.rate_limit_per_minute, per_day=settings.rate_limit_per_day
 )
@@ -89,6 +93,7 @@ gemini_client = build_gemini_client(
     default_tts_model=settings.tts_model,
 )
 user_locks = UserLocks()
+global_queue = GlobalQueueManager(max_concurrent=settings.max_concurrent_requests)
 
 
 async def _limits_line(user_id: int) -> str:
@@ -249,11 +254,21 @@ async def _render_limits_menu_text(user_id: int) -> str:
 @router.message(CommandStart())
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
-    state = await storage.get(message.from_user.id, chat_id=message.chat.id)
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    chat_title = message.chat.title or message.chat.full_name or "Личные сообщения"
+    await storage.track_user_chat(
+        user_id=user_id,
+        chat_id=chat_id,
+        chat_title=chat_title,
+        chat_type=message.chat.type,
+    )
+    state = await storage.get(user_id, chat_id=chat_id)
+    is_admin = await storage.is_user_admin(user_id)
     await message.answer(
         _render_main_menu_text(state),
         parse_mode="HTML",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(is_admin=is_admin),
     )
 
 
@@ -579,13 +594,15 @@ async def cb_speak_response(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:main")
 async def cb_menu_main(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    is_admin = await storage.is_user_admin(user_id)
     try:
         await callback.message.edit_text(
             _render_main_menu_text(state),
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(is_admin=is_admin),
         )
     except TelegramBadRequest:
         pass
@@ -769,22 +786,76 @@ async def cb_toggle_voice(callback: CallbackQuery) -> None:
     await callback.answer("Голосовые ответы: " + ("включены" if voice else "выключены"))
 
 
+@router.message(Command("clear"))
+async def cmd_clear(message: Message) -> None:
+    user_id = message.from_user.id
+    chats = await storage.get_user_chats_with_history(user_id)
+    if not chats:
+        await message.answer("ℹ️ У вас нет сохранённой истории диалогов ни в одном чате.")
+        return
+    await message.answer(
+        "🗑 <b>Выберите чат для очистки истории диалога:</b>",
+        parse_mode="HTML",
+        reply_markup=clear_history_chats_keyboard(chats),
+    )
+
+
 @router.callback_query(F.data.in_({"clear_history", "menu:clear_hist"}))
 async def cb_clear_history(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    await storage.clear_history(callback.from_user.id, chat_id=chat_id)
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
-    # Если нажали из главного меню, обновим счетчик в главном меню
-    if callback.data == "menu:clear_hist":
+    user_id = callback.from_user.id
+    chats = await storage.get_user_chats_with_history(user_id)
+    if not chats:
+        await callback.answer("У вас нет сохранённой истории ни в одном чате.", show_alert=True)
+        return
+    try:
+        await callback.message.edit_text(
+            "🗑 <b>Выберите чат для очистки истории диалога:</b>",
+            parse_mode="HTML",
+            reply_markup=clear_history_chats_keyboard(chats),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("clear_chat:"))
+async def cb_clear_chat(callback: CallbackQuery) -> None:
+    target = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    if target == "all":
+        deleted = await storage.clear_history(user_id, all_chats=True)
+        await callback.answer(f"История во всех чатах удалена ({deleted} реплик) 💥", show_alert=True)
+    else:
+        try:
+            target_chat_id = int(target)
+            deleted = await storage.clear_history(user_id, chat_id=target_chat_id)
+            await callback.answer(f"История выбранного чата удалена ({deleted} реплик) ✅", show_alert=True)
+        except ValueError:
+            await callback.answer("Ошибка определения чата", show_alert=True)
+            return
+
+    # Обновляем список чатов
+    chats = await storage.get_user_chats_with_history(user_id)
+    if chats:
         try:
             await callback.message.edit_text(
-                _render_main_menu_text(state),
+                "🗑 <b>Выберите чат для очистки истории диалога:</b>",
                 parse_mode="HTML",
-                reply_markup=main_menu_keyboard(),
+                reply_markup=clear_history_chats_keyboard(chats),
             )
         except TelegramBadRequest:
             pass
-    await callback.answer("История этого чата очищена ✅")
+    else:
+        chat_id = callback.message.chat.id if callback.message else user_id
+        state = await storage.get(user_id, chat_id=chat_id)
+        try:
+            await callback.message.edit_text(
+                "⚙️ <b>Параметры чата и ответов:</b>\n\n✅ <i>Вся история диалогов очищена.</i>",
+                parse_mode="HTML",
+                reply_markup=settings_keyboard(state.rich_mode, state.voice_mode),
+            )
+        except TelegramBadRequest:
+            pass
 
 
 @router.callback_query(F.data == "menu:prompt")
@@ -832,6 +903,203 @@ async def cb_menu_limits(callback: CallbackQuery) -> None:
     await callback.answer("Лимиты обновлены")
 
 
+# --- Панель администратора ---
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    user_id = message.from_user.id
+    if not await storage.is_user_admin(user_id):
+        await message.answer("⛔️ У вас нет прав администратора.")
+        return
+    whitelist_mode = await storage.get_whitelist_mode()
+    await message.answer(
+        "👑 <b>Панель управления администратора:</b>\n\n"
+        f"• <b>Режим белого списка:</b> {'ВКЛ ✅ (доступ только разрешённым)' if whitelist_mode else 'ВЫКЛ ❌ (доступен всем)'}\n\n"
+        "<i>Используйте кнопки ниже для управления пользователями и доступом:</i>",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(whitelist_mode),
+    )
+
+
+@router.callback_query(F.data == "menu:admin")
+async def cb_menu_admin(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    if not await storage.is_user_admin(user_id):
+        await callback.answer("⛔️ У вас нет прав администратора.", show_alert=True)
+        return
+    whitelist_mode = await storage.get_whitelist_mode()
+    try:
+        await callback.message.edit_text(
+            "👑 <b>Панель управления администратора:</b>\n\n"
+            f"• <b>Режим белого списка:</b> {'ВКЛ ✅ (доступ только разрешённым)' if whitelist_mode else 'ВЫКЛ ❌ (доступен всем)'}\n\n"
+            "<i>Используйте кнопки ниже для управления пользователями и доступом:</i>",
+            parse_mode="HTML",
+            reply_markup=admin_panel_keyboard(whitelist_mode),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:toggle_whitelist")
+async def cb_admin_toggle_whitelist(callback: CallbackQuery) -> None:
+    if not await storage.is_user_admin(callback.from_user.id):
+        await callback.answer("⛔️ Доступ запрещён", show_alert=True)
+        return
+    new_state = await storage.toggle_whitelist_mode()
+    try:
+        await callback.message.edit_text(
+            "👑 <b>Панель управления администратора:</b>\n\n"
+            f"• <b>Режим белого списка:</b> {'ВКЛ ✅ (доступ только разрешённым)' if new_state else 'ВЫКЛ ❌ (доступен всем)'}\n\n"
+            "<i>Используйте кнопки ниже для управления пользователями и доступом:</i>",
+            parse_mode="HTML",
+            reply_markup=admin_panel_keyboard(new_state),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer(f"Белый список: {'ВКЛ ✅' if new_state else 'ВЫКЛ ❌'}")
+
+
+@router.callback_query(F.data == "admin:users")
+async def cb_admin_users(callback: CallbackQuery) -> None:
+    if not await storage.is_user_admin(callback.from_user.id):
+        await callback.answer("⛔️ Доступ запрещён", show_alert=True)
+        return
+    users = await storage.list_allowed_users()
+    count = len(users)
+    text = f"👥 <b>Разрешённые пользователи ({count}):</b>\n\n"
+    if not users:
+        text += "<i>Список пуст. Вы можете добавить пользователей командой <code>/adduser &lt;id&gt;</code>.</i>"
+    else:
+        text += "<i>Нажмите на ❌ напротив пользователя, чтобы удалить доступ:</i>"
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=admin_users_keyboard(users),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:del_user:"))
+async def cb_admin_del_user(callback: CallbackQuery) -> None:
+    if not await storage.is_user_admin(callback.from_user.id):
+        await callback.answer("⛔️ Доступ запрещён", show_alert=True)
+        return
+    target_id_str = callback.data.split(":", 2)[2]
+    try:
+        target_id = int(target_id_str)
+        if target_id in settings.admin_ids and target_id == callback.from_user.id:
+            await callback.answer("Нельзя удалить самого себя из супер-админов!", show_alert=True)
+            return
+        await storage.remove_allowed_user(target_id)
+        await callback.answer(f"Пользователь {target_id} удалён ✅")
+    except ValueError:
+        await callback.answer("Неверный ID", show_alert=True)
+        return
+
+    users = await storage.list_allowed_users()
+    try:
+        await callback.message.edit_text(
+            f"👥 <b>Разрешённые пользователи ({len(users)}):</b>\n\n"
+            "<i>Нажмите на ❌ напротив пользователя, чтобы удалить доступ:</i>",
+            parse_mode="HTML",
+            reply_markup=admin_users_keyboard(users),
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "admin:add_user_hint")
+async def cb_admin_add_user_hint(callback: CallbackQuery) -> None:
+    if not await storage.is_user_admin(callback.from_user.id):
+        await callback.answer("⛔️ Доступ запрещён", show_alert=True)
+        return
+    await callback.message.answer(
+        "➕ <b>Добавление пользователя:</b>\n\n"
+        "Отправьте команду:\n"
+        "• <code>/adduser 123456789 username</code> — добавить обычного пользователя\n"
+        "• <code>/addadmin 123456789 username</code> — добавить администратора\n\n"
+        "<i>User ID можно узнать, переслав сообщение пользователя в бот @userinfobot.</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(Command("adduser", "addadmin"))
+async def cmd_adduser(message: Message) -> None:
+    if not await storage.is_user_admin(message.from_user.id):
+        await message.answer("⛔️ У вас нет прав администратора.")
+        return
+    args = message.text.split() if message.text else []
+    if len(args) < 2:
+        await message.answer(
+            "Использование: <code>/adduser &lt;user_id&gt; [username]</code> или <code>/addadmin &lt;user_id&gt;</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        target_uid = int(args[1])
+    except ValueError:
+        await message.answer("⚠️ ID пользователя должен быть числом.")
+        return
+    username = args[2] if len(args) > 2 else ""
+    is_admin = args[0].lower().startswith("/addadmin")
+    await storage.add_allowed_user(
+        user_id=target_uid,
+        username=username,
+        is_admin=is_admin,
+        added_by=message.from_user.id,
+    )
+    role_text = "Администратор" if is_admin else "Пользователь"
+    await message.answer(
+        f"✅ {role_text} <code>{target_uid}</code> ({username or 'без ника'}) добавлен в белый список!",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("deluser"))
+async def cmd_deluser(message: Message) -> None:
+    if not await storage.is_user_admin(message.from_user.id):
+        await message.answer("⛔️ У вас нет прав администратора.")
+        return
+    args = message.text.split() if message.text else []
+    if len(args) < 2:
+        await message.answer("Использование: <code>/deluser &lt;user_id&gt;</code>", parse_mode="HTML")
+        return
+    try:
+        target_uid = int(args[1])
+    except ValueError:
+        await message.answer("⚠️ ID пользователя должен быть числом.")
+        return
+    if target_uid in settings.admin_ids and target_uid == message.from_user.id:
+        await message.answer("⚠️ Нельзя удалить самого себя из супер-админов.")
+        return
+    removed = await storage.remove_allowed_user(target_uid)
+    if removed:
+        await message.answer(f"✅ Пользователь <code>{target_uid}</code> удалён из белого списка.", parse_mode="HTML")
+    else:
+        await message.answer(f"ℹ️ Пользователь <code>{target_uid}</code> не был найден в базе.", parse_mode="HTML")
+
+
+@router.message(Command("users"))
+async def cmd_users(message: Message) -> None:
+    if not await storage.is_user_admin(message.from_user.id):
+        await message.answer("⛔️ У вас нет прав администратора.")
+        return
+    users = await storage.list_allowed_users()
+    if not users:
+        await message.answer("👥 В базе данных пока нет добавленных пользователей.")
+        return
+    await message.answer(
+        f"👥 <b>Разрешённые пользователи ({len(users)}):</b>",
+        parse_mode="HTML",
+        reply_markup=admin_users_keyboard(users),
+    )
+
+
 
 # --- Общий обработчик запросов (текст / фото / документы / голосовые) ---
 
@@ -860,6 +1128,13 @@ async def _process_user_turn(
 ) -> None:
     user_id = message.from_user.id
     chat_id = message.chat.id
+    chat_title = message.chat.title or message.chat.full_name or "Личные сообщения"
+    await storage.track_user_chat(
+        user_id=user_id,
+        chat_id=chat_id,
+        chat_title=chat_title,
+        chat_type=message.chat.type,
+    )
 
     async with user_locks.get(user_id):
         limit_status = await limiter.check(user_id)
@@ -871,45 +1146,64 @@ async def _process_user_turn(
             )
             return
 
-        state = await storage.get(user_id, chat_id=chat_id)
-        want_audio = False if force_text_only else (state.voice_mode or force_voice_reply)
-        action = (
-            ChatActionSender.record_voice
-            if want_audio
-            else ChatActionSender.typing
-        )
+        waiting_msg: Optional[Message] = None
 
-        async with action(bot=message.bot, chat_id=message.chat.id):
+        async def notify_waiting(pos: int) -> None:
+            nonlocal waiting_msg
             try:
-                response = await gemini_client.ask(
-                    model=state.model,
-                    history_turns=state.history,
-                    message=content_input,
-                    system_prompt=state.system_prompt,
-                    want_audio=want_audio,
-                    voice_name=state.tts_voice,
+                waiting_msg = await message.answer(
+                    f"⏳ <i>Запрос в очереди сервера (ваша позиция: {pos})...</i>",
+                    parse_mode="HTML",
                 )
-            except GeminiError as exc:
-                await message.answer(f"⚠️ {exc}")
-                return
             except Exception:
-                logger.exception("Unexpected error while calling Gemini API")
-                await message.answer("⚠️ Непредвиденная ошибка при обращении к Gemini API.")
-                return
+                pass
 
-            await limiter.hit(user_id)
-            await storage.add_turn(user_id, "user", history_text, chat_id=chat_id)
-            if response.text:
-                await storage.add_turn(user_id, "model", response.text, chat_id=chat_id)
-            if response.total_tokens > 0:
-                await storage.record_token_usage(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    model=state.model,
-                    prompt_tokens=response.prompt_tokens,
-                    candidates_tokens=response.candidates_tokens,
-                    total_tokens=response.total_tokens,
-                )
+        async with global_queue.acquire(user_id, on_waiting=notify_waiting):
+            if waiting_msg is not None:
+                try:
+                    await waiting_msg.delete()
+                except Exception:
+                    pass
+
+            state = await storage.get(user_id, chat_id=chat_id)
+            want_audio = False if force_text_only else (state.voice_mode or force_voice_reply)
+            action = (
+                ChatActionSender.record_voice
+                if want_audio
+                else ChatActionSender.typing
+            )
+
+            async with action(bot=message.bot, chat_id=message.chat.id):
+                try:
+                    response = await gemini_client.ask(
+                        model=state.model,
+                        history_turns=state.history,
+                        message=content_input,
+                        system_prompt=state.system_prompt,
+                        want_audio=want_audio,
+                        voice_name=state.tts_voice,
+                    )
+                except GeminiError as exc:
+                    await message.answer(f"⚠️ {exc}")
+                    return
+                except Exception:
+                    logger.exception("Unexpected error while calling Gemini API")
+                    await message.answer("⚠️ Непредвиденная ошибка при обращении к Gemini API.")
+                    return
+
+                await limiter.hit(user_id)
+                await storage.add_turn(user_id, "user", history_text, chat_id=chat_id)
+                if response.text:
+                    await storage.add_turn(user_id, "model", response.text, chat_id=chat_id)
+                if response.total_tokens > 0:
+                    await storage.record_token_usage(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        model=state.model,
+                        prompt_tokens=response.prompt_tokens,
+                        candidates_tokens=response.candidates_tokens,
+                        total_tokens=response.total_tokens,
+                    )
 
         await _send_response(
             message=message,

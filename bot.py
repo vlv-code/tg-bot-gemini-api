@@ -7,6 +7,7 @@ from aiogram.types import BotCommand
 
 from config import settings
 from handlers import router, storage
+from middlewares import AccessMiddleware
 
 BOT_COMMANDS = [
     BotCommand(command="menu", description="Главное меню настроек и моделей"),
@@ -18,6 +19,8 @@ BOT_COMMANDS = [
     BotCommand(command="prompt", description="Настроить системный промпт"),
     BotCommand(command="tts", description="Озвучить произвольный текст"),
     BotCommand(command="limits", description="Проверить остаток лимитов запросов"),
+    BotCommand(command="clear", description="Очистить историю диалога (выбор чатов)"),
+    BotCommand(command="admin", description="Панель администратора (для админов)"),
 ]
 
 
@@ -31,6 +34,7 @@ async def main() -> None:
     # per-message в handlers.py в зависимости от настройки пользователя
     bot = Bot(token=settings.telegram_token, default=DefaultBotProperties(parse_mode=None))
     dispatcher = Dispatcher()
+    dispatcher.update.outer_middleware(AccessMiddleware(storage=storage))
     dispatcher.include_router(router)
 
     await bot.set_my_commands(BOT_COMMANDS)

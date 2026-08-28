@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # без рута
-RUN useradd --create-home --uid 1000 bot && chown -R bot:bot /app
+RUN mkdir -p /app/data && useradd --create-home --uid 1000 bot && chown -R bot:bot /app
 USER bot
 
 # бот сам логирует старт/ошибки, healthcheck поверх процесса

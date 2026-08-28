@@ -1801,6 +1801,23 @@ async def handle_inline(query: InlineQuery) -> None:
                     await limiter.hit(user_id)
             except Exception as exc:
                 logger.warning("Ошибка при генерации TTS в инлайн-режиме: %s", exc)
+                friendly_msg = str(exc)
+                article = InlineQueryResultArticle(
+                    id="tts_error",
+                    title="⚠️ Озвучка TTS временно недоступна",
+                    description=f"{friendly_msg[:80]}",
+                    input_message_content=InputTextMessageContent(
+                        message_text=(
+                            f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
+                            f"⚠️ <i>{html.escape(friendly_msg)}</i>"
+                        ),
+                        parse_mode="HTML",
+                    ),
+                )
+                try:
+                    await query.answer(results=[article], cache_time=10, is_personal=True)
+                except Exception:
+                    pass
                 return
 
             audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)

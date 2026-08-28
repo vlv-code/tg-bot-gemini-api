@@ -228,6 +228,8 @@ class GeminiClient:
         status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
         text = str(exc)
         if status == 429 or "RESOURCE_EXHAUSTED" in text or "429" in text:
+            if "limit: 10" in text or "FreeTier" in text or "free_tier_requests" in text:
+                return "Лимит бесплатных запросов Gemini TTS на сегодня исчерпан (Google Free Tier: 10 запросов в сутки)."
             delay_match = re.search(r"retryDelay[\"':\s]+([0-9.]+s?)", text, re.IGNORECASE)
             if delay_match:
                 delay_str = delay_match.group(1)

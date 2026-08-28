@@ -39,6 +39,8 @@
 ### 1. Клонирование и настройка окружения
 
 ```bash
+git clone https://github.com/vlv-code/tg-bot-gemini-api.git
+cd tg-bot-gemini-api
 cp .env.example .env
 ```
 

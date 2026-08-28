@@ -74,6 +74,9 @@ class Settings:
     # Пользователь может переопределить промпт индивидуально командой /prompt.
     system_prompt: str = os.getenv("SYSTEM_PROMPT", "")
 
+    # Задержка (в секундах) перед запуском генерации TTS в инлайн-режиме (debounce при наборе текста)
+    inline_tts_debounce_seconds: float = float(os.getenv("INLINE_TTS_DEBOUNCE_SECONDS", "3.0"))
+
 
 
 settings = Settings()

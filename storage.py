@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import hashlib
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -170,6 +171,23 @@ class UserStorage:
                     value TEXT NOT NULL
                 )
                 """
+            )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tts_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cache_key TEXT UNIQUE NOT NULL,
+                    text TEXT NOT NULL,
+                    voice TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tts_cache_key ON tts_cache (cache_key)"
             )
             await db.commit()
 
@@ -585,6 +603,36 @@ class UserStorage:
             "all_total": int(all_row["all_total"]) if all_row else 0,
             "all_requests": int(all_row["all_requests"]) if all_row else 0,
         }
+
+    @staticmethod
+    def _make_tts_cache_key(text: str, voice: str, model: str) -> str:
+        raw = f"{text.strip().lower()}:{voice}:{model}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    async def get_cached_tts_voice(self, text: str, voice: str, model: str) -> Optional[str]:
+        """Возвращает сохранённый voice_file_id из кэша, если такой текст уже озвучивался."""
+        db = await self._ensure_db()
+        key = self._make_tts_cache_key(text, voice, model)
+        cursor = await db.execute(
+            "SELECT file_id FROM tts_cache WHERE cache_key = ?",
+            (key,),
+        )
+        row = await cursor.fetchone()
+        return row["file_id"] if row else None
+
+    async def save_cached_tts_voice(self, text: str, voice: str, model: str, file_id: str) -> None:
+        """Сохраняет сгенерированный voice_file_id в базу данных."""
+        db = await self._ensure_db()
+        key = self._make_tts_cache_key(text, voice, model)
+        await db.execute(
+            """
+            INSERT INTO tts_cache (cache_key, text, voice, model, file_id)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET file_id = excluded.file_id
+            """,
+            (key, text.strip(), voice, model, file_id),
+        )
+        await db.commit()
 
 
 

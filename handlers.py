@@ -1701,7 +1701,7 @@ async def handle_inline(query: InlineQuery) -> None:
         for k in list(_pending_inline_prompts.keys())[:200]:
             _pending_inline_prompts.pop(k, None)
 
-    # Режим 1: Озвучка текста (/tts или tts) -> генерация только после отправки в чат
+    # Режим 1: Озвучка текста (/tts или tts) -> нативное голосовое сообщение в чат
     if raw_query.lower().startswith(("/tts", "tts")):
         parts = raw_query.split(maxsplit=1)
         tts_text = parts[1].strip() if len(parts) > 1 else ""
@@ -1709,7 +1709,7 @@ async def handle_inline(query: InlineQuery) -> None:
             article = InlineQueryResultArticle(
                 id="tts_hint",
                 title="🎙 Озвучить текст (TTS)",
-                description="Наберите текст: @bot_username /tts Текст для озвучки",
+                description="Наберите: @bot_username /tts Текст для озвучки",
                 input_message_content=InputTextMessageContent(
                     message_text="Использование TTS: <code>@bot_username /tts Текст для озвучки</code>",
                     parse_mode="HTML",
@@ -1718,31 +1718,104 @@ async def handle_inline(query: InlineQuery) -> None:
             await query.answer(results=[article], cache_time=0, is_personal=True)
             return
 
-        prompt_short = tts_text[:70] + ("…" if len(tts_text) > 70 else "")
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🎙 Синтезирую голосовое...",
-                        callback_data=f"inline_tts:{result_id}",
-                    )
-                ]
-            ]
+        user_id = query.from_user.id
+        state = await storage.get_settings(user_id)
+
+        # 1. Проверяем постоянный кэш в SQLite (0 мс, 0 квоты)
+        cached_file_id = await storage.get_cached_tts_voice(
+            text=tts_text,
+            voice=state.tts_voice,
+            model=state.tts_model,
         )
-        article = InlineQueryResultArticle(
-            id=result_id,
-            title="🎙 Озвучить текст (TTS)",
-            description=f"«{prompt_short}» (нажмите для отправки и озвучки)",
-            reply_markup=keyboard,
-            input_message_content=InputTextMessageContent(
-                message_text=(
-                    f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
-                    "⏳ <i>Синтезирую голосовое сообщение...</i>"
+
+        if cached_file_id:
+            voice_res = InlineQueryResultCachedVoice(
+                id=result_id,
+                voice_file_id=cached_file_id,
+                title=f"🎙 {tts_text[:60]}",
+            )
+            await query.answer(results=[voice_res], cache_time=300, is_personal=True)
+            return
+
+        # 2. Если текста мало (набор только начался) — показываем статус
+        if len(tts_text) < 3:
+            article = InlineQueryResultArticle(
+                id="tts_typing",
+                title="🎙 Озвучить текст (TTS)",
+                description=f"«{tts_text}» (продолжайте ввод...)",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"🎙 <b>Озвучка:</b> {html.escape(tts_text)}",
+                    parse_mode="HTML",
                 ),
-                parse_mode="HTML",
-            ),
+            )
+            await query.answer(results=[article], cache_time=0, is_personal=True)
+            return
+
+        # 3. Debounce: ждем паузу в наборе текста (из INLINE_TTS_DEBOUNCE_SECONDS в .env)
+        query_token = f"{query.id}:{result_id}"
+        _active_inline_tts_tasks[user_id] = query_token
+
+        if settings.inline_tts_debounce_seconds > 0:
+            await asyncio.sleep(settings.inline_tts_debounce_seconds)
+
+        if _active_inline_tts_tasks.get(user_id) != query_token:
+            # Пользователь продолжил печатать — отменяем старый запрос
+            return
+
+        # 4. Генерируем речь через Gemini API
+        async with user_locks.get(user_id):
+            limit_status = await limiter.check(user_id)
+            if not limit_status.allowed:
+                return
+
+            priority = await _get_user_priority(user_id)
+            try:
+                async with global_queue.acquire(user_id, priority=priority):
+                    audio_bytes = await gemini_client.generate_speech(
+                        text=tts_text,
+                        voice_name=state.tts_voice,
+                        model=state.tts_model,
+                    )
+                    await limiter.hit(user_id)
+            except Exception:
+                logger.exception("Ошибка при генерации TTS в инлайн-режиме")
+                return
+
+            audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
+            voice_file = BufferedInputFile(audio_data, filename=audio_filename)
+
+            try:
+                # Бесшумный upload на серверы Telegram для получения voice_file_id
+                sent_msg = await query.bot.send_voice(
+                    chat_id=user_id,
+                    voice=voice_file,
+                    disable_notification=True,
+                )
+                file_id = sent_msg.voice.file_id
+                try:
+                    await query.bot.delete_message(chat_id=user_id, message_id=sent_msg.message_id)
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.warning("Не удалось выполнить silent upload voice: %s", exc)
+                return
+
+            await storage.save_cached_tts_voice(
+                text=tts_text,
+                voice=state.tts_voice,
+                model=state.tts_model,
+                file_id=file_id,
+            )
+
+        voice_res = InlineQueryResultCachedVoice(
+            id=result_id,
+            voice_file_id=file_id,
+            title=f"🎙 {tts_text[:60]}",
         )
-        await query.answer(results=[article], cache_time=0, is_personal=True)
+        try:
+            await query.answer(results=[voice_res], cache_time=300, is_personal=True)
+        except Exception:
+            pass
         return
 
     # Режим 2: Картинка по ссылке
@@ -1800,19 +1873,9 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     if not raw_query:
         return
 
+    # Если это было голосовое сообщение, оно уже доставлено Telegram нативно через CachedVoice
     if raw_query.lower().startswith(("/tts", "tts")):
-        parts = raw_query.split(maxsplit=1)
-        tts_text = parts[1].strip() if len(parts) > 1 else ""
-        if tts_text:
-            _run_background_task(
-                _execute_inline_tts_generation(
-                    bot=chosen.bot,
-                    user_id=chosen.from_user.id,
-                    tts_text=tts_text,
-                    inline_message_id=chosen.inline_message_id,
-                )
-            )
-            return
+        return
 
     _run_background_task(
         _execute_inline_generation(

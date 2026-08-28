@@ -1791,21 +1791,35 @@ async def handle_inline(query: InlineQuery) -> None:
             audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
             voice_file = BufferedInputFile(audio_data, filename=audio_filename)
 
+            # Бесшумный upload на серверы Telegram для получения voice_file_id
+            target_chat_id = user_id
             try:
-                # Бесшумный upload на серверы Telegram для получения voice_file_id
                 sent_msg = await query.bot.send_voice(
-                    chat_id=user_id,
+                    chat_id=target_chat_id,
                     voice=voice_file,
                     disable_notification=True,
                 )
-                file_id = sent_msg.voice.file_id
-                try:
-                    await query.bot.delete_message(chat_id=user_id, message_id=sent_msg.message_id)
-                except Exception:
-                    pass
-            except Exception as exc:
-                logger.warning("Не удалось выполнить silent upload voice: %s", exc)
-                return
+            except Exception:
+                # Если у пользователя нет открытого ЛС с ботом, используем чат суперадмина
+                if settings.admin_ids:
+                    target_chat_id = settings.admin_ids[0]
+                    try:
+                        sent_msg = await query.bot.send_voice(
+                            chat_id=target_chat_id,
+                            voice=voice_file,
+                            disable_notification=True,
+                        )
+                    except Exception as exc2:
+                        logger.warning("Не удалось выполнить silent upload voice суперадмину: %s", exc2)
+                        return
+                else:
+                    return
+
+            file_id = sent_msg.voice.file_id
+            try:
+                await query.bot.delete_message(chat_id=target_chat_id, message_id=sent_msg.message_id)
+            except Exception:
+                pass
 
             await storage.save_cached_tts_voice(
                 text=tts_text,

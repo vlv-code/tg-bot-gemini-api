@@ -134,6 +134,15 @@ async def _limits_line(user_id: int) -> str:
     return f"📊 {status.used_minute}/{status.limit_minute} в минуту · {status.used_day}/{status.limit_day} сегодня"
 
 
+async def _get_user_priority(user_id: int) -> int:
+    """Определяет уровень приоритета в глобальной очереди: 0 (суперадмин), 1 (админ), 2 (пользователь)."""
+    if user_id in settings.admin_ids:
+        return 0
+    if await storage.is_user_admin(user_id):
+        return 1
+    return 2
+
+
 def _render_main_menu_text(state: UserState) -> str:
     rich_str = "вкл ✅" if state.rich_mode else "выкл ❌"
     voice_str = "вкл 🎙" if state.voice_mode else "выкл 🔇"
@@ -372,23 +381,25 @@ async def cmd_tts(message: Message) -> None:
             return
 
         state = await storage.get_settings(user_id)
+        priority = await _get_user_priority(user_id)
 
-        async with ChatActionSender.record_voice(bot=message.bot, chat_id=message.chat.id):
-            try:
-                audio_bytes = await gemini_client.generate_speech(
-                    text=text_to_speak,
-                    voice_name=state.tts_voice,
-                    model=state.tts_model,
-                )
-            except GeminiError as exc:
-                await message.answer(f"⚠️ {exc}")
-                return
-            except Exception:
-                logger.exception("Ошибка при генерации TTS")
-                await message.answer("⚠️ Непредвиденная ошибка при генерации речи.")
-                return
+        async with global_queue.acquire(user_id, priority=priority):
+            async with ChatActionSender.record_voice(bot=message.bot, chat_id=message.chat.id):
+                try:
+                    audio_bytes = await gemini_client.generate_speech(
+                        text=text_to_speak,
+                        voice_name=state.tts_voice,
+                        model=state.tts_model,
+                    )
+                except GeminiError as exc:
+                    await message.answer(f"⚠️ {exc}")
+                    return
+                except Exception:
+                    logger.exception("Ошибка при генерации TTS")
+                    await message.answer("⚠️ Непредвиденная ошибка при генерации речи.")
+                    return
 
-            await limiter.hit(user_id)
+                await limiter.hit(user_id)
 
         audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
         voice_file = BufferedInputFile(audio_data, filename=audio_filename)
@@ -626,16 +637,18 @@ async def cb_speak_response(callback: CallbackQuery) -> None:
             return
 
         state = await storage.get_settings(user_id)
+        priority = await _get_user_priority(user_id)
 
         await callback.answer("Синтезирую голосовое...")
 
         try:
-            audio_bytes = await gemini_client.generate_speech(
-                text=text_to_speak[:2000],
-                voice_name=state.tts_voice,
-                model=state.tts_model,
-            )
-            await limiter.hit(user_id)
+            async with global_queue.acquire(user_id, priority=priority):
+                audio_bytes = await gemini_client.generate_speech(
+                    text=text_to_speak[:2000],
+                    voice_name=state.tts_voice,
+                    model=state.tts_model,
+                )
+                await limiter.hit(user_id)
             audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
             voice_file = BufferedInputFile(audio_data, filename=audio_filename)
             await msg.reply_voice(voice_file)
@@ -1200,19 +1213,21 @@ async def _process_user_turn(
             )
             return
 
+        priority = await _get_user_priority(user_id)
         waiting_msg: Optional[Message] = None
 
         async def notify_waiting(pos: int) -> None:
             nonlocal waiting_msg
             try:
+                role_badge = " 👑" if priority == 0 else ""
                 waiting_msg = await message.answer(
-                    f"⏳ <i>Запрос в очереди сервера (ваша позиция: {pos})...</i>",
+                    f"⏳ <i>Запрос в очереди сервера (ваша позиция: {pos}{role_badge})...</i>",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
 
-        async with global_queue.acquire(user_id, on_waiting=notify_waiting):
+        async with global_queue.acquire(user_id, priority=priority, on_waiting=notify_waiting):
             if waiting_msg is not None:
                 try:
                     await waiting_msg.delete()
@@ -1443,13 +1458,16 @@ async def _execute_inline_tts_generation(
             return
 
         state = await storage.get_settings(user_id)
+        priority = await _get_user_priority(user_id)
 
         try:
-            audio_bytes = await gemini_client.generate_speech(
-                text=tts_text,
-                voice_name=state.tts_voice,
-                model=state.tts_model,
-            )
+            async with global_queue.acquire(user_id, priority=priority):
+                audio_bytes = await gemini_client.generate_speech(
+                    text=tts_text,
+                    voice_name=state.tts_voice,
+                    model=state.tts_model,
+                )
+                await limiter.hit(user_id)
         except GeminiError as exc:
             try:
                 await bot.edit_message_text(
@@ -1479,8 +1497,6 @@ async def _execute_inline_tts_generation(
             except TelegramBadRequest:
                 pass
             return
-
-        await limiter.hit(user_id)
 
     audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
     bot_info = await bot.get_me()
@@ -1554,6 +1570,7 @@ async def _execute_inline_generation(
             return
 
         state = await storage.get(user_id)
+        priority = await _get_user_priority(user_id)
 
         # Проверяем наличие ссылки на изображение
         content_input: Union[str, Sequence[Union[str, types.Part]]] = raw_query
@@ -1568,14 +1585,16 @@ async def _execute_inline_generation(
                 content_input = [image_part, clean_query]
 
         try:
-            # Inline-запросы выполняются как изолированные разовые обращения
-            response = await gemini_client.ask(
-                model=state.model,
-                history_turns=[],
-                message=content_input,
-                system_prompt=state.system_prompt,
-                want_audio=False,
-            )
+            # Inline-запросы выполняются через глобальную очередь с учетом приоритета
+            async with global_queue.acquire(user_id, priority=priority):
+                response = await gemini_client.ask(
+                    model=state.model,
+                    history_turns=[],
+                    message=content_input,
+                    system_prompt=state.system_prompt,
+                    want_audio=False,
+                )
+                await limiter.hit(user_id)
         except GeminiError as exc:
             try:
                 await bot.edit_message_text(
@@ -1606,7 +1625,6 @@ async def _execute_inline_generation(
                 pass
             return
 
-        await limiter.hit(user_id)
         if response.total_tokens > 0:
             await storage.record_token_usage(
                 user_id=user_id,

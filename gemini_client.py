@@ -4,6 +4,7 @@
 вызывающим кодом (хранится в storage.py).
 """
 
+import re
 from dataclasses import dataclass
 from typing import Optional, Sequence, Union
 
@@ -210,9 +211,13 @@ class GeminiClient:
         status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
         text = str(exc)
         if status == 429 or "RESOURCE_EXHAUSTED" in text or "429" in text:
-            return "Gemini API вернул лимит запросов (429). Попробуй чуть позже."
+            delay_match = re.search(r"retryDelay[\"':\s]+([0-9.]+s?)", text, re.IGNORECASE)
+            if delay_match:
+                delay_str = delay_match.group(1)
+                return f"Лимит запросов Gemini API временно исчерпан (429). Попробуйте снова через {delay_str}."
+            return "Лимит запросов Gemini API временно исчерпан (429). Попробуйте через несколько секунд."
         if status in (401, 403) or "PERMISSION_DENIED" in text:
-            return "Gemini API отклонил ключ (401/403). Проверь GEMINI_API_KEY."
+            return "Gemini API отклонил ключ (401/403). Проверьте GEMINI_API_KEY."
         if status == 400 or "INVALID_ARGUMENT" in text:
             return f"Некорректный запрос к Gemini API: {text}"
         return f"Ошибка при обращении к Gemini API: {text}"

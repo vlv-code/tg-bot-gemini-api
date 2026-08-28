@@ -37,7 +37,7 @@ class GeminiClient:
         api_key: str,
         default_system_prompt: str = "",
         default_voice: str = "Aoede",
-        default_tts_model: str = "gemini-2.5-flash",
+        default_tts_model: str = "gemini-3.1-flash-tts-preview",
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self.default_system_prompt = default_system_prompt
@@ -62,22 +62,19 @@ class GeminiClient:
         want_audio: bool = False,
         voice_name: Optional[str] = None,
     ) -> GeminiResponse:
-        """Отправляет запрос (текст или мультимедиа) в Gemini и возвращает ответ."""
+        """Отправляет сообщение в Gemini с учётом истории диалога."""
         history = self._build_history(history_turns)
-        effective_prompt = (
-            system_prompt
-            if system_prompt is not None and system_prompt != ""
-            else self.default_system_prompt
+        effective_system_prompt = (
+            system_prompt if system_prompt is not None else self.default_system_prompt
         )
         effective_voice = voice_name or self.default_voice
 
         config_kwargs = {}
-        if effective_prompt:
-            config_kwargs["system_instruction"] = effective_prompt
+        if effective_system_prompt:
+            config_kwargs["system_instruction"] = effective_system_prompt
 
         if want_audio:
-            # Для аудио-ответа запрашиваем AUDIO модальность
-            config_kwargs["response_modalities"] = ["AUDIO"]
+            config_kwargs["response_modalities"] = ["AUDIO", "TEXT"]
             config_kwargs["speech_config"] = types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -145,9 +142,15 @@ class GeminiClient:
             models_to_try.append(model)
         if self.default_tts_model and self.default_tts_model not in models_to_try:
             models_to_try.append(self.default_tts_model)
-        for fallback in ("gemini-2.5-flash", "gemini-2.0-flash"):
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
+        for candidate in (
+            "gemini-3.1-flash-tts-preview",
+            "gemini-2.5-flash-preview-tts",
+            "gemini-2.5-flash-tts",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+        ):
+            if candidate not in models_to_try:
+                models_to_try.append(candidate)
 
         last_error = None
         for target_model in models_to_try:
@@ -198,7 +201,7 @@ def build_gemini_client(
     api_key: str,
     default_system_prompt: str = "",
     default_voice: str = "Aoede",
-    default_tts_model: str = "gemini-2.5-flash",
+    default_tts_model: str = "gemini-3.1-flash-tts-preview",
 ) -> GeminiClient:
     return GeminiClient(
         api_key=api_key,

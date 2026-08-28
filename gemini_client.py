@@ -235,6 +235,8 @@ class GeminiClient:
                 delay_str = delay_match.group(1)
                 return f"Лимит запросов Gemini API временно исчерпан (429). Попробуйте снова через {delay_str}."
             return "Лимит запросов Gemini API временно исчерпан (429). Попробуйте через несколько секунд."
+        if status == 503 or "503" in text or "UNAVAILABLE" in text or "high demand" in text.lower():
+            return "Серверы Google Gemini временно перегружены (503 Service Unavailable). Попробуйте повторить запрос через пару секунд или выберите другую модель через /model."
         if status in (401, 403) or "PERMISSION_DENIED" in text:
             return "Gemini API отклонил ключ (401/403). Проверьте GEMINI_API_KEY."
         if status == 400 or "INVALID_ARGUMENT" in text:

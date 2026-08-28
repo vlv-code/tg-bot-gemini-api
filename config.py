@@ -38,11 +38,17 @@ class Settings:
         default_factory=lambda: [int(x) for x in _get_list("ALLOWED_USER_IDS", "")]
     )
 
+    # Путь к файлу SQLite базы данных
+    db_path: str = os.getenv("DB_PATH", "data/bot.db")
+
+    # Пресет голоса для Gemini Audio / TTS (Puck, Charon, Kore, Fenrir, Aoede)
+    tts_voice: str = os.getenv("TTS_VOICE", "Aoede")
+
     # System instruction для Gemini — тон/язык/персона ответов. Пусто = без
-    # system_instruction вообще (поведение Gemini по умолчанию). Можно
-    # переопределить на лету командой /prompt, не трогая .env — тот
-    # останется значением по умолчанию при рестарте контейнера.
+    # system_instruction вообще (поведение Gemini по умолчанию).
+    # Пользователь может переопределить промпт индивидуально командой /prompt.
     system_prompt: str = os.getenv("SYSTEM_PROMPT", "")
+
 
 
 settings = Settings()

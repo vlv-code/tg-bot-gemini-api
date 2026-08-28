@@ -2,9 +2,12 @@ import asyncio
 import hashlib
 import html
 import io
+import ipaddress
 import logging
 import re
+import socket
 from typing import Optional, Sequence, Union
+import urllib.parse
 
 import aiohttp
 from aiogram import Bot, F, Router
@@ -43,7 +46,6 @@ from keyboards import (
     tts_voices_keyboard,
 )
 from locks import GlobalQueueManager, UserLocks
-from middlewares import AccessMiddleware
 from rate_limiter import RateLimiter
 from storage import UserState, UserStorage
 
@@ -52,22 +54,57 @@ logger = logging.getLogger(__name__)
 URL_REGEX = re.compile(r'https?://[^\s<>"]+')
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')
 
+# Защита от сборщика мусора CPython для фоновых inline-задач
+_background_tasks: set[asyncio.Task] = set()
+
 
 async def try_download_image_from_url(url: str) -> Optional[tuple[bytes, str]]:
-    """Пытается скачать изображение по ссылке (до 15 МБ)."""
+    """Безопасно скачивает изображение по ссылке с защитой от SSRF и лимитом 15 МБ."""
     try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+
+        # SSRF-защита: валидируем IP хоста
+        loop = asyncio.get_running_loop()
+        addr_info = await loop.getaddrinfo(parsed.hostname, None)
+        for *_, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            ):
+                logger.warning("Заблокирован SSRF-запрос к приватному адресу %s (%s)", parsed.hostname, ip_str)
+                return None
+
+        max_bytes = 15 * 1024 * 1024
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), allow_redirects=False) as resp:
                 if resp.status == 200:
                     content_type = resp.headers.get("Content-Type", "").lower()
-                    if "image/" in content_type or url.lower().endswith(IMAGE_EXTENSIONS):
-                        mime = content_type.split(";")[0] if "image/" in content_type else "image/jpeg"
-                        data = await resp.read()
-                        if len(data) <= 15 * 1024 * 1024:
-                            return data, mime
+                    if not ("image/" in content_type or url.lower().endswith(IMAGE_EXTENSIONS)):
+                        return None
+
+                    mime = content_type.split(";")[0] if "image/" in content_type else "image/jpeg"
+
+                    chunks = []
+                    total_size = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total_size += len(chunk)
+                        if total_size > max_bytes:
+                            logger.warning("Изображение по ссылке %s превышает лимит 15 МБ, отмена", url)
+                            return None
+                        chunks.append(chunk)
+
+                    return b"".join(chunks), mime
     except Exception:
         pass
     return None
+
 
 storage = UserStorage(
     db_path=settings.db_path,
@@ -78,10 +115,6 @@ storage = UserStorage(
 )
 
 router = Router()
-router.message.outer_middleware(AccessMiddleware(storage=storage))
-router.callback_query.outer_middleware(AccessMiddleware(storage=storage))
-router.inline_query.outer_middleware(AccessMiddleware(storage=storage))
-router.chosen_inline_result.outer_middleware(AccessMiddleware(storage=storage))
 
 limiter = RateLimiter(
     per_minute=settings.rate_limit_per_minute, per_day=settings.rate_limit_per_day
@@ -165,14 +198,13 @@ async def _send_response(
     message: Message,
     state: UserState,
     response: GeminiResponse,
-    user_id: int,
     prompt_text: str = "",
     want_audio: bool = False,
 ) -> None:
     """Отправляет ответ пользователю (голосовое сообщение и/или текст с цитатой запроса)."""
     if want_audio and response.audio_bytes:
         try:
-            audio_data, audio_filename, _ = convert_gemini_audio(response.audio_bytes)
+            audio_data, audio_filename, _ = await convert_gemini_audio(response.audio_bytes)
             voice_file = BufferedInputFile(audio_data, filename=audio_filename)
             await message.answer_voice(voice_file)
         except Exception:
@@ -339,7 +371,7 @@ async def cmd_tts(message: Message) -> None:
             )
             return
 
-        state = await storage.get(user_id, chat_id=message.chat.id)
+        state = await storage.get_settings(user_id)
 
         async with ChatActionSender.record_voice(bot=message.bot, chat_id=message.chat.id):
             try:
@@ -358,7 +390,7 @@ async def cmd_tts(message: Message) -> None:
 
             await limiter.hit(user_id)
 
-        audio_data, audio_filename, _ = convert_gemini_audio(audio_bytes)
+        audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
         voice_file = BufferedInputFile(audio_data, filename=audio_filename)
         await message.answer_voice(voice_file)
 
@@ -563,31 +595,53 @@ async def cb_speak_response(callback: CallbackQuery) -> None:
         return
 
     # Очищаем текст от цитаты запроса (blockquote)
-    lines = msg.text.split("\n")
-    cleaned_lines = [line for line in lines if not line.startswith(">")]
-    text_to_speak = "\n".join(cleaned_lines).strip() or msg.text
+    text_to_speak = ""
+    if msg.entities:
+        quote_end = 0
+        for ent in msg.entities:
+            if ent.type in ("blockquote", "expandable_blockquote"):
+                quote_end = max(quote_end, ent.offset + ent.length)
+        if quote_end > 0:
+            text_to_speak = msg.text[quote_end:].strip()
+
+    if not text_to_speak:
+        # Fallback для plain-режима (строки с >)
+        lines = msg.text.split("\n")
+        cleaned_lines = [line for line in lines if not line.startswith(">")]
+        text_to_speak = "\n".join(cleaned_lines).strip() or msg.text
 
     if not text_to_speak:
         await callback.answer("Нечего озвучивать", show_alert=True)
         return
 
     user_id = callback.from_user.id
-    state = await storage.get(user_id)
+    async with user_locks.get(user_id):
+        limit_status = await limiter.check(user_id)
+        if not limit_status.allowed:
+            wait_seconds = int(limit_status.retry_after) + 1
+            await callback.answer(
+                f"Лимит запросов исчерпан. Попробуйте через {wait_seconds} сек.",
+                show_alert=True,
+            )
+            return
 
-    await callback.answer("Синтезирую голосовое...")
+        state = await storage.get_settings(user_id)
 
-    try:
-        audio_bytes = await gemini_client.generate_speech(
-            text=text_to_speak[:2000],
-            voice_name=state.tts_voice,
-            model=state.tts_model,
-        )
-        audio_data, audio_filename, _ = convert_gemini_audio(audio_bytes)
-        voice_file = BufferedInputFile(audio_data, filename=audio_filename)
-        await msg.reply_voice(voice_file)
-    except Exception as exc:
-        logger.exception("Ошибка при озвучке ответа")
-        await msg.reply(f"⚠️ Не удалось озвучить: {exc}")
+        await callback.answer("Синтезирую голосовое...")
+
+        try:
+            audio_bytes = await gemini_client.generate_speech(
+                text=text_to_speak[:2000],
+                voice_name=state.tts_voice,
+                model=state.tts_model,
+            )
+            await limiter.hit(user_id)
+            audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
+            voice_file = BufferedInputFile(audio_data, filename=audio_filename)
+            await msg.reply_voice(voice_file)
+        except Exception as exc:
+            logger.exception("Ошибка при озвучке ответа")
+            await msg.reply(f"⚠️ Не удалось озвучить: {exc}")
 
 
 # --- Callback-хендлеры навигации по единому меню ---
@@ -1209,7 +1263,6 @@ async def _process_user_turn(
             message=message,
             state=state,
             response=response,
-            user_id=user_id,
             prompt_text=history_text,
             want_audio=want_audio,
         )
@@ -1389,7 +1442,7 @@ async def _execute_inline_tts_generation(
                 pass
             return
 
-        state = await storage.get(user_id)
+        state = await storage.get_settings(user_id)
 
         try:
             audio_bytes = await gemini_client.generate_speech(
@@ -1429,7 +1482,7 @@ async def _execute_inline_tts_generation(
 
         await limiter.hit(user_id)
 
-    audio_data, audio_filename, _ = convert_gemini_audio(audio_bytes)
+    audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
     bot_info = await bot.get_me()
     bot_username = bot_info.username or ""
 
@@ -1711,6 +1764,14 @@ async def handle_inline(query: InlineQuery) -> None:
     )
 
 
+def _run_background_task(coro) -> asyncio.Task:
+    """Запускает фоновую задачу с защитой от сборщика мусора CPython."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 @router.chosen_inline_result()
 async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     """Срабатывает ровно в момент, когда пользователь кликнул карточку и отправил сообщение."""
@@ -1725,7 +1786,7 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
         parts = raw_query.split(maxsplit=1)
         tts_text = parts[1].strip() if len(parts) > 1 else ""
         if tts_text:
-            asyncio.create_task(
+            _run_background_task(
                 _execute_inline_tts_generation(
                     bot=chosen.bot,
                     user_id=chosen.from_user.id,
@@ -1735,7 +1796,7 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
             )
             return
 
-    asyncio.create_task(
+    _run_background_task(
         _execute_inline_generation(
             bot=chosen.bot,
             user_id=chosen.from_user.id,
@@ -1759,7 +1820,7 @@ async def cb_inline_gen(callback: CallbackQuery) -> None:
         return
 
     await callback.answer("Генерация запущена...")
-    asyncio.create_task(
+    _run_background_task(
         _execute_inline_generation(
             bot=callback.bot,
             user_id=callback.from_user.id,
@@ -1785,7 +1846,7 @@ async def cb_inline_tts(callback: CallbackQuery) -> None:
     parts = raw_query.split(maxsplit=1)
     tts_text = parts[1].strip() if len(parts) > 1 else raw_query
     await callback.answer("Синтез речи запущен...")
-    asyncio.create_task(
+    _run_background_task(
         _execute_inline_tts_generation(
             bot=callback.bot,
             user_id=callback.from_user.id,

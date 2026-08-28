@@ -241,6 +241,27 @@ class UserStorage:
             history=history,
         )
 
+    async def get_settings(self, user_id: int) -> UserState:
+        """Получает только настройки пользователя без выборки истории сообщений."""
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+
+        cursor = await db.execute(
+            "SELECT model, rich_mode, voice_mode, system_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+
+        return UserState(
+            model=row["model"],
+            rich_mode=bool(row["rich_mode"]),
+            voice_mode=bool(row["voice_mode"]),
+            system_prompt=row["system_prompt"] or "",
+            tts_model=row["tts_model"] or self._default_tts_model,
+            tts_voice=row["tts_voice"] or self._default_tts_voice,
+            history=[],
+        )
+
     async def set_model(self, user_id: int, model: str) -> None:
         db = await self._ensure_db()
         await self._ensure_user(db, user_id)

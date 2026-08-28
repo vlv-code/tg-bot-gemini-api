@@ -46,6 +46,7 @@ gemini_client = build_gemini_client(
     api_key=settings.gemini_api_key,
     default_system_prompt=settings.system_prompt,
     default_voice=settings.tts_voice,
+    default_tts_model=settings.tts_model,
 )
 user_locks = UserLocks()
 

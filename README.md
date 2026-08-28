@@ -1,6 +1,6 @@
 # 🤖 Telegram Bot for Google Gemini API
 
-Асинхронный Telegram-бот на базе **aiogram 3** и официального **Google GenAI SDK (`google-genai`)** с поддержкой актуальных моделей Gemini (2.5 Flash, 2.5 Pro, 2.0 Flash), мультимодальности (фото, PDF, голосовые), генерации речи (TTS), постоянного хранилища SQLite (`aiosqlite`) и защиты от спама.
+Асинхронный Telegram-бот на базе **aiogram 3** и официального **Google GenAI SDK (`google-genai`)** с поддержкой актуальных моделей Gemini (3.5 Flash Lite, 3.1 Flash Lite, 3.7 Flash, 3.5 Flash, 2.5 Flash), мультимодальности (фото, PDF, голосовые), генерации речи (TTS), постоянного хранилища SQLite (`aiosqlite`) и защиты от спама.
 
 ---
 
@@ -84,7 +84,7 @@ python bot.py
 ## 🛠 Команды бота
 
 - /start — приветствие, информация о текущей модели и список доступных команд.
-- /model — выбор активной модели Gemini (gemini-2.5-flash, gemini-2.5-pro и др.).
+- /model — выбор активной модели Gemini (`gemini-3.5-flash-lite`, `gemini-3.7-flash` и др.).
 - /settings — настройки (Rich-режим, голосовые ответы, очистка истории диалога).
 - /prompt — просмотр, изменение или сброс индивидуального системного промпта.
 - /tts <текст> — озвучить текст голосовым сообщением.

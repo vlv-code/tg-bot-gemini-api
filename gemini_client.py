@@ -32,10 +32,18 @@ class GeminiResponse:
 
 
 class GeminiClient:
-    def __init__(self, api_key: str, default_system_prompt: str = "", default_voice: str = "Aoede") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        default_system_prompt: str = "",
+        default_voice: str = "Aoede",
+        default_tts_model: str = "gemini-3.1-flash-tts",
+    ) -> None:
         self._client = genai.Client(api_key=api_key)
         self.default_system_prompt = default_system_prompt
         self.default_voice = default_voice
+        self.default_tts_model = default_tts_model
+
 
     @staticmethod
     def _build_history(turns: list[Turn]) -> list[types.Content]:
@@ -126,10 +134,11 @@ class GeminiClient:
         return GeminiResponse(text=text, audio_bytes=audio_bytes, audio_mime_type=audio_mime_type)
 
     async def generate_speech(
-        self, text: str, voice_name: Optional[str] = None, model: str = "gemini-2.0-flash"
+        self, text: str, voice_name: Optional[str] = None, model: Optional[str] = None
     ) -> bytes:
         """Синтезирует речь из текста (TTS) с помощью аудио-модальности Gemini."""
         effective_voice = voice_name or self.default_voice
+        target_model = model or self.default_tts_model
         config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
@@ -142,7 +151,7 @@ class GeminiClient:
         )
         try:
             response = await self._client.aio.models.generate_content(
-                model=model,
+                model=target_model,
                 contents=f"Прочитай следующий текст:\n\n{text}",
                 config=config,
             )
@@ -171,10 +180,15 @@ class GeminiClient:
 
 
 def build_gemini_client(
-    api_key: str, default_system_prompt: str = "", default_voice: str = "Aoede"
+    api_key: str,
+    default_system_prompt: str = "",
+    default_voice: str = "Aoede",
+    default_tts_model: str = "gemini-3.1-flash-tts",
 ) -> GeminiClient:
     return GeminiClient(
         api_key=api_key,
         default_system_prompt=default_system_prompt,
         default_voice=default_voice,
+        default_tts_model=default_tts_model,
     )
+

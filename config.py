@@ -29,8 +29,8 @@ class Settings:
 
     max_history_messages: int = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 
-    rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
-    rate_limit_per_day: int = int(os.getenv("RATE_LIMIT_PER_DAY", "100"))
+    rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "15"))
+    rate_limit_per_day: int = int(os.getenv("RATE_LIMIT_PER_DAY", "500"))
 
     # Список Telegram user_id, которым разрешено пользоваться ботом.
     # Пусто = бот отвечает всем (публичный режим).
@@ -40,6 +40,9 @@ class Settings:
 
     # Путь к файлу SQLite базы данных
     db_path: str = os.getenv("DB_PATH", "data/bot.db")
+
+    # Модель для TTS генерации речи (gemini-3.1-flash-tts, gemini-2.5-flash-tts)
+    tts_model: str = os.getenv("TTS_MODEL", "gemini-3.1-flash-tts")
 
     # Пресет голоса для Gemini Audio / TTS (Puck, Charon, Kore, Fenrir, Aoede)
     tts_voice: str = os.getenv("TTS_VOICE", "Aoede")

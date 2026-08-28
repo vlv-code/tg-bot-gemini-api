@@ -216,7 +216,18 @@ async def _send_response(
                     reply_markup=(speak_kb if is_last else None),
                 )
 
-    await message.answer(await _limits_line(user_id))
+
+async def _render_limits_menu_text(user_id: int) -> str:
+    status = await limiter.status(user_id)
+    rem_min = max(0, status.limit_minute - status.used_minute)
+    rem_day = max(0, status.limit_day - status.used_day)
+    return (
+        "📊 <b>Статус лимитов и квоты запросов:</b>\n\n"
+        f"• <b>Запросов за минуту:</b> <code>{status.used_minute}/{status.limit_minute}</code> (осталось: {rem_min})\n"
+        f"• <b>Запросов за сутки:</b> <code>{status.used_day}/{status.limit_day}</code> (осталось: {rem_day})\n\n"
+        "💡 <i>Лимиты работают по скользящему окну (60 сек для минутного и 24 ч для суточного). "
+        "В Google GenAI API нет эндпоинта для проверки остатка глобального баланса — при исчерпании Google возвращает ошибку 429 с таймером ожидания.</i>"
+    )
 
 
 
@@ -327,9 +338,9 @@ async def cmd_tts(message: Message) -> None:
 @router.message(Command("limits"))
 async def cmd_limits(message: Message) -> None:
     user_id = message.from_user.id
-    status_line = await _limits_line(user_id)
+    text = await _render_limits_menu_text(user_id)
     await message.answer(
-        f"📊 <b>Текущие лимиты запросов:</b>\n\n{status_line}",
+        text,
         parse_mode="HTML",
         reply_markup=limits_keyboard(),
     )
@@ -796,10 +807,10 @@ async def cb_reset_prompt(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.in_({"menu:limits", "refresh_limits"}))
 async def cb_menu_limits(callback: CallbackQuery) -> None:
-    status_line = await _limits_line(callback.from_user.id)
+    text = await _render_limits_menu_text(callback.from_user.id)
     try:
         await callback.message.edit_text(
-            f"📊 <b>Текущие лимиты запросов:</b>\n\n{status_line}",
+            text,
             parse_mode="HTML",
             reply_markup=limits_keyboard(),
         )

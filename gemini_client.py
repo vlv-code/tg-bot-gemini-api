@@ -176,11 +176,11 @@ class GeminiClient:
         if self.default_tts_model and self.default_tts_model not in models_to_try:
             models_to_try.append(self.default_tts_model)
         for candidate in (
+            "gemini-3.6-flash",
+            "gemini-2.5-flash",
             "gemini-3.1-flash-tts-preview",
             "gemini-2.5-flash-preview-tts",
             "gemini-2.5-flash-tts",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
         ):
             if candidate not in models_to_try:
                 models_to_try.append(candidate)

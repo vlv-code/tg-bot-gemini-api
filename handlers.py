@@ -1799,8 +1799,8 @@ async def handle_inline(query: InlineQuery) -> None:
                         model=state.tts_model,
                     )
                     await limiter.hit(user_id)
-            except Exception:
-                logger.exception("Ошибка при генерации TTS в инлайн-режиме")
+            except Exception as exc:
+                logger.warning("Ошибка при генерации TTS в инлайн-режиме: %s", exc)
                 return
 
             audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)

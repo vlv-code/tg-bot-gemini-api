@@ -1171,10 +1171,12 @@ async def cmd_users(message: Message) -> None:
 # --- Общий обработчик запросов (текст / фото / документы / голосовые) ---
 
 def _parse_caption_voice_flags(caption: Optional[str]) -> tuple[str, bool, bool]:
-    """Проверяет команды /voice или /text в подписи к файлу. Возвращает (clean_prompt, force_voice, force_text)."""
+    """Проверяет команды /voice или /text и упоминания бота в подписи к файлу. Возвращает (clean_prompt, force_voice, force_text)."""
     if not caption:
         return "", False, False
     cap = caption.strip()
+    # Убираем тег упоминания бота в начале, если пользователь тегнул бота в группе
+    cap = re.sub(r"^@\w+\s*", "", cap).strip()
     if cap.startswith(("/voice", "/v")):
         parts = cap.split(maxsplit=1)
         clean = parts[1].strip() if len(parts) > 1 else ""
@@ -1285,7 +1287,8 @@ async def _process_user_turn(
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message) -> None:
-    text = message.text
+    clean_text, force_voice, force_text = _parse_caption_voice_flags(message.text)
+    clean_text = clean_text or message.text
 
     # 1. Если пользователь ответил текстом на сообщение с фото или документом-картинкой
     if message.reply_to_message:
@@ -1296,13 +1299,14 @@ async def handle_text(message: Message) -> None:
             await message.bot.download(photo.file_id, destination=file_io)
             image_bytes = file_io.getvalue()
             image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-            content_input = [image_part, text]
-            history_text = f"[Фото из ответа] {text}"
+            content_input = [image_part, clean_text]
+            history_text = f"[Фото из ответа] {clean_text}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,
                 history_text=history_text,
-                force_voice_reply=False,
+                force_voice_reply=force_voice,
+                force_text_only=force_text,
             )
             return
 
@@ -1312,41 +1316,44 @@ async def handle_text(message: Message) -> None:
             await message.bot.download(doc.file_id, destination=file_io)
             doc_bytes = file_io.getvalue()
             doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=doc.mime_type or "image/jpeg")
-            content_input = [doc_part, text]
-            history_text = f"[Изображение-документ из ответа] {text}"
+            content_input = [doc_part, clean_text]
+            history_text = f"[Изображение-документ из ответа] {clean_text}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,
                 history_text=history_text,
-                force_voice_reply=False,
+                force_voice_reply=force_voice,
+                force_text_only=force_text,
             )
             return
 
     # 2. Если в тексте есть прямая ссылка на изображение
-    url_match = URL_REGEX.search(text)
+    url_match = URL_REGEX.search(clean_text)
     if url_match:
         url = url_match.group(0)
         img_data = await try_download_image_from_url(url)
         if img_data:
             img_bytes, mime = img_data
             image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
-            clean_text = text.replace(url, "").strip() or "Опиши подробно, что изображено на этом фото."
-            content_input = [image_part, clean_text]
-            history_text = f"[Фото по ссылке] {clean_text}"
+            prompt_without_url = clean_text.replace(url, "").strip() or "Опиши подробно, что изображено на этом фото."
+            content_input = [image_part, prompt_without_url]
+            history_text = f"[Фото по ссылке] {prompt_without_url}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,
                 history_text=history_text,
-                force_voice_reply=False,
+                force_voice_reply=force_voice,
+                force_text_only=force_text,
             )
             return
 
     # 3. Обычный текстовый запрос
     await _process_user_turn(
         message=message,
-        content_input=message.text,
-        history_text=message.text,
-        force_voice_reply=False,
+        content_input=clean_text,
+        history_text=clean_text,
+        force_voice_reply=force_voice,
+        force_text_only=force_text,
     )
 
 

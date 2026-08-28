@@ -11,10 +11,12 @@ from handlers import router, storage
 BOT_COMMANDS = [
     BotCommand(command="menu", description="Главное меню настроек и моделей"),
     BotCommand(command="start", description="Запустить бота и открыть меню"),
+    BotCommand(command="voice", description="Задать вопрос и получить ответ голосом"),
+    BotCommand(command="text", description="Задать вопрос и получить ответ текстом"),
     BotCommand(command="model", description="Выбрать основную модель Gemini"),
     BotCommand(command="settings", description="Параметры чата и голосовые ответы"),
     BotCommand(command="prompt", description="Настроить системный промпт"),
-    BotCommand(command="tts", description="Озвучить текст голосовым сообщением"),
+    BotCommand(command="tts", description="Озвучить произвольный текст"),
     BotCommand(command="limits", description="Проверить остаток лимитов запросов"),
 ]
 

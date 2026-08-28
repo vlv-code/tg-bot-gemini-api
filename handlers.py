@@ -161,10 +161,10 @@ async def _send_response(
     response: GeminiResponse,
     user_id: int,
     prompt_text: str = "",
-    force_voice: bool = False,
+    want_audio: bool = False,
 ) -> None:
     """Отправляет ответ пользователю (голосовое сообщение и/или текст с цитатой запроса)."""
-    if (state.voice_mode or force_voice) and response.audio_bytes:
+    if want_audio and response.audio_bytes:
         try:
             audio_data, audio_filename, _ = convert_gemini_audio(response.audio_bytes)
             voice_file = BufferedInputFile(audio_data, filename=audio_filename)
@@ -174,16 +174,46 @@ async def _send_response(
 
     if response.text:
         full_text = _format_with_prompt_quote(prompt_text, response.text)
+        speak_kb = None
+        if not want_audio:
+            speak_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🎙 Озвучить ответ",
+                            callback_data="speak_response",
+                        )
+                    ]
+                ]
+            )
+
         if state.rich_mode:
-            for chunk_text, chunk_entities in markdown_to_chunks(full_text):
+            chunks = markdown_to_chunks(full_text)
+            for idx, (chunk_text, chunk_entities) in enumerate(chunks):
+                is_last = (idx == len(chunks) - 1)
                 try:
-                    await message.answer(chunk_text, entities=chunk_entities)
+                    await message.answer(
+                        chunk_text,
+                        entities=chunk_entities,
+                        reply_markup=(speak_kb if is_last else None),
+                    )
                 except Exception:
                     logger.warning("Ошибка отправки с entities, отправляем чистым текстом")
-                    await message.answer(chunk_text)
+                    plain_chunks = split_plain_text(chunk_text)
+                    for p_idx, chunk in enumerate(plain_chunks):
+                        p_is_last = is_last and (p_idx == len(plain_chunks) - 1)
+                        await message.answer(
+                            chunk,
+                            reply_markup=(speak_kb if p_is_last else None),
+                        )
         else:
-            for chunk in split_plain_text(full_text):
-                await message.answer(chunk)
+            plain_chunks = split_plain_text(full_text)
+            for idx, chunk in enumerate(plain_chunks):
+                is_last = (idx == len(plain_chunks) - 1)
+                await message.answer(
+                    chunk,
+                    reply_markup=(speak_kb if is_last else None),
+                )
 
     await message.answer(await _limits_line(user_id))
 
@@ -302,6 +332,222 @@ async def cmd_limits(message: Message) -> None:
         parse_mode="HTML",
         reply_markup=limits_keyboard(),
     )
+
+
+@router.message(Command("voice", "v"))
+async def cmd_voice(message: Message) -> None:
+    """Принудительный ответ голосом на вопрос или вложение."""
+    args = message.text.split(maxsplit=1) if message.text else []
+    query_text = args[1].strip() if len(args) > 1 else ""
+
+    # 1. Если был реплай на фото / документ / аудио
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.photo:
+            photo = replied.photo[-1]
+            file_io = io.BytesIO()
+            await message.bot.download(photo.file_id, destination=file_io)
+            image_part = types.Part.from_bytes(data=file_io.getvalue(), mime_type="image/jpeg")
+            prompt = query_text or "Опиши подробно голосом, что изображено на этом фото."
+            await _process_user_turn(
+                message=message,
+                content_input=[image_part, prompt],
+                history_text=f"[Фото из ответа] {prompt}",
+                force_voice_reply=True,
+            )
+            return
+
+        if replied.document:
+            doc = replied.document
+            file_io = io.BytesIO()
+            await message.bot.download(doc.file_id, destination=file_io)
+            doc_part = types.Part.from_bytes(
+                data=file_io.getvalue(),
+                mime_type=doc.mime_type or "application/octet-stream",
+            )
+            prompt = query_text or f"Проанализируй документ {doc.file_name or ''} и ответь голосом."
+            await _process_user_turn(
+                message=message,
+                content_input=[doc_part, prompt],
+                history_text=f"[Документ из ответа: {doc.file_name or 'файл'}] {prompt}",
+                force_voice_reply=True,
+            )
+            return
+
+        if replied.voice or replied.audio:
+            media = replied.voice or replied.audio
+            file_io = io.BytesIO()
+            await message.bot.download(media.file_id, destination=file_io)
+            audio_part = types.Part.from_bytes(
+                data=file_io.getvalue(),
+                mime_type=media.mime_type or "audio/ogg",
+            )
+            prompt = query_text or "Ответь голосом на это аудиосообщение."
+            await _process_user_turn(
+                message=message,
+                content_input=[audio_part, prompt],
+                history_text=f"[Голосовое сообщение] {prompt}",
+                force_voice_reply=True,
+            )
+            return
+
+    if not query_text:
+        await message.answer(
+            "Использование: <code>/voice ваш вопрос</code>\n\n"
+            "Либо ответьте командой <code>/voice</code> на любое фото, документ или сообщение в чате, чтобы получить ответ голосом.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Проверяем ссылку на изображение
+    url_match = URL_REGEX.search(query_text)
+    if url_match:
+        url = url_match.group(0)
+        img_data = await try_download_image_from_url(url)
+        if img_data:
+            img_bytes, mime = img_data
+            image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
+            clean_text = query_text.replace(url, "").strip() or "Опиши подробно голосом, что на фото."
+            await _process_user_turn(
+                message=message,
+                content_input=[image_part, clean_text],
+                history_text=f"[Фото по ссылке] {clean_text}",
+                force_voice_reply=True,
+            )
+            return
+
+    await _process_user_turn(
+        message=message,
+        content_input=query_text,
+        history_text=query_text,
+        force_voice_reply=True,
+    )
+
+
+@router.message(Command("text", "t"))
+async def cmd_text(message: Message) -> None:
+    """Принудительный ответ текстом на вопрос или вложение."""
+    args = message.text.split(maxsplit=1) if message.text else []
+    query_text = args[1].strip() if len(args) > 1 else ""
+
+    # 1. Если был реплай на фото / документ / аудио
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.photo:
+            photo = replied.photo[-1]
+            file_io = io.BytesIO()
+            await message.bot.download(photo.file_id, destination=file_io)
+            image_part = types.Part.from_bytes(data=file_io.getvalue(), mime_type="image/jpeg")
+            prompt = query_text or "Опиши подробно текстом, что изображено на этом фото."
+            await _process_user_turn(
+                message=message,
+                content_input=[image_part, prompt],
+                history_text=f"[Фото из ответа] {prompt}",
+                force_text_only=True,
+            )
+            return
+
+        if replied.document:
+            doc = replied.document
+            file_io = io.BytesIO()
+            await message.bot.download(doc.file_id, destination=file_io)
+            doc_part = types.Part.from_bytes(
+                data=file_io.getvalue(),
+                mime_type=doc.mime_type or "application/octet-stream",
+            )
+            prompt = query_text or f"Проанализируй документ {doc.file_name or ''}."
+            await _process_user_turn(
+                message=message,
+                content_input=[doc_part, prompt],
+                history_text=f"[Документ из ответа: {doc.file_name or 'файл'}] {prompt}",
+                force_text_only=True,
+            )
+            return
+
+        if replied.voice or replied.audio:
+            media = replied.voice or replied.audio
+            file_io = io.BytesIO()
+            await message.bot.download(media.file_id, destination=file_io)
+            audio_part = types.Part.from_bytes(
+                data=file_io.getvalue(),
+                mime_type=media.mime_type or "audio/ogg",
+            )
+            prompt = query_text or "Ответь текстом на аудиосообщение."
+            await _process_user_turn(
+                message=message,
+                content_input=[audio_part, prompt],
+                history_text=f"[Голосовое сообщение] {prompt}",
+                force_text_only=True,
+            )
+            return
+
+    if not query_text:
+        await message.answer(
+            "Использование: <code>/text ваш вопрос</code>\n\n"
+            "Либо ответьте командой <code>/text</code> на любое голосовое, фото или документ, чтобы получить ответ строго текстом.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Проверяем ссылку на изображение
+    url_match = URL_REGEX.search(query_text)
+    if url_match:
+        url = url_match.group(0)
+        img_data = await try_download_image_from_url(url)
+        if img_data:
+            img_bytes, mime = img_data
+            image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
+            clean_text = query_text.replace(url, "").strip() or "Опиши подробно, что на фото."
+            await _process_user_turn(
+                message=message,
+                content_input=[image_part, clean_text],
+                history_text=f"[Фото по ссылке] {clean_text}",
+                force_text_only=True,
+            )
+            return
+
+    await _process_user_turn(
+        message=message,
+        content_input=query_text,
+        history_text=query_text,
+        force_text_only=True,
+    )
+
+
+@router.callback_query(F.data == "speak_response")
+async def cb_speak_response(callback: CallbackQuery) -> None:
+    """Озвучивает текст сообщения по клику на кнопку под ответом."""
+    msg = callback.message
+    if not msg or not msg.text:
+        await callback.answer("Текст сообщения недоступен", show_alert=True)
+        return
+
+    # Очищаем текст от цитаты запроса (blockquote)
+    lines = msg.text.split("\n")
+    cleaned_lines = [line for line in lines if not line.startswith(">")]
+    text_to_speak = "\n".join(cleaned_lines).strip() or msg.text
+
+    if not text_to_speak:
+        await callback.answer("Нечего озвучивать", show_alert=True)
+        return
+
+    user_id = callback.from_user.id
+    state = await storage.get(user_id)
+
+    await callback.answer("Синтезирую голосовое...")
+
+    try:
+        audio_bytes = await gemini_client.generate_speech(
+            text=text_to_speak[:2000],
+            voice_name=state.tts_voice,
+            model=state.tts_model,
+        )
+        audio_data, audio_filename, _ = convert_gemini_audio(audio_bytes)
+        voice_file = BufferedInputFile(audio_data, filename=audio_filename)
+        await msg.reply_voice(voice_file)
+    except Exception as exc:
+        logger.exception("Ошибка при озвучке ответа")
+        await msg.reply(f"⚠️ Не удалось озвучить: {exc}")
 
 
 # --- Callback-хендлеры навигации по единому меню ---
@@ -564,11 +810,28 @@ async def cb_menu_limits(callback: CallbackQuery) -> None:
 
 # --- Общий обработчик запросов (текст / фото / документы / голосовые) ---
 
+def _parse_caption_voice_flags(caption: Optional[str]) -> tuple[str, bool, bool]:
+    """Проверяет команды /voice или /text в подписи к файлу. Возвращает (clean_prompt, force_voice, force_text)."""
+    if not caption:
+        return "", False, False
+    cap = caption.strip()
+    if cap.startswith(("/voice", "/v")):
+        parts = cap.split(maxsplit=1)
+        clean = parts[1].strip() if len(parts) > 1 else ""
+        return clean, True, False
+    if cap.startswith(("/text", "/t")):
+        parts = cap.split(maxsplit=1)
+        clean = parts[1].strip() if len(parts) > 1 else ""
+        return clean, False, True
+    return cap, False, False
+
+
 async def _process_user_turn(
     message: Message,
     content_input: Union[str, Sequence[Union[str, types.Part]]],
     history_text: str,
     force_voice_reply: bool = False,
+    force_text_only: bool = False,
 ) -> None:
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -584,9 +847,10 @@ async def _process_user_turn(
             return
 
         state = await storage.get(user_id, chat_id=chat_id)
+        want_audio = False if force_text_only else (state.voice_mode or force_voice_reply)
         action = (
             ChatActionSender.record_voice
-            if (state.voice_mode or force_voice_reply)
+            if want_audio
             else ChatActionSender.typing
         )
 
@@ -597,7 +861,7 @@ async def _process_user_turn(
                     history_turns=state.history,
                     message=content_input,
                     system_prompt=state.system_prompt,
-                    want_audio=(state.voice_mode or force_voice_reply),
+                    want_audio=want_audio,
                     voice_name=state.tts_voice,
                 )
             except GeminiError as exc:
@@ -619,7 +883,7 @@ async def _process_user_turn(
             response=response,
             user_id=user_id,
             prompt_text=history_text,
-            force_voice=force_voice_reply,
+            want_audio=want_audio,
         )
 
 
@@ -693,7 +957,8 @@ async def handle_text(message: Message) -> None:
 @router.message(F.photo)
 async def handle_photo(message: Message) -> None:
     photo = message.photo[-1]
-    prompt_text = message.caption or "Опиши подробно, что изображено на этом фото."
+    clean_cap, force_voice, force_text = _parse_caption_voice_flags(message.caption)
+    prompt_text = clean_cap or "Опиши подробно, что изображено на этом фото."
 
     file_io = io.BytesIO()
     await message.bot.download(photo.file_id, destination=file_io)
@@ -707,15 +972,17 @@ async def handle_photo(message: Message) -> None:
         message=message,
         content_input=content_input,
         history_text=history_text,
-        force_voice_reply=False,
+        force_voice_reply=force_voice,
+        force_text_only=force_text,
     )
 
 
 @router.message(F.voice | F.audio)
 async def handle_voice(message: Message) -> None:
     media = message.voice or message.audio
+    clean_cap, force_voice, force_text = _parse_caption_voice_flags(message.caption)
     mime_type = media.mime_type or ("audio/ogg" if message.voice else "audio/mp3")
-    prompt_text = message.caption or "Ответь на аудиосообщение."
+    prompt_text = clean_cap or "Ответь на аудиосообщение."
 
     file_io = io.BytesIO()
     await message.bot.download(media.file_id, destination=file_io)
@@ -725,20 +992,22 @@ async def handle_voice(message: Message) -> None:
     content_input = [audio_part, prompt_text]
     history_text = f"[Голосовое сообщение] {prompt_text}"
 
-    # Если пользователь прислал голосовое — отвечаем голосом
+    # По умолчанию для голосовых отвечаем голосом, если явно не запрошен только текст
     await _process_user_turn(
         message=message,
         content_input=content_input,
         history_text=history_text,
-        force_voice_reply=True,
+        force_voice_reply=True if not force_text else False,
+        force_text_only=force_text,
     )
 
 
 @router.message(F.document)
 async def handle_document(message: Message) -> None:
     doc = message.document
+    clean_cap, force_voice, force_text = _parse_caption_voice_flags(message.caption)
     mime_type = doc.mime_type or "application/octet-stream"
-    prompt_text = message.caption or f"Проанализируй документ {doc.file_name or ''}."
+    prompt_text = clean_cap or f"Проанализируй документ {doc.file_name or ''}."
 
     file_io = io.BytesIO()
     await message.bot.download(doc.file_id, destination=file_io)
@@ -752,7 +1021,8 @@ async def handle_document(message: Message) -> None:
         message=message,
         content_input=content_input,
         history_text=history_text,
-        force_voice_reply=False,
+        force_voice_reply=force_voice,
+        force_text_only=force_text,
     )
 
 

@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    container_name: gemini-tg-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # портов нет: бот работает через long polling, входящих подключений не принимает

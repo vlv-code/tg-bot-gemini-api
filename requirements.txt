@@ -1,0 +1,4 @@
+aiogram>=3.15,<4
+google-genai>=1.0
+python-dotenv>=1.0
+telegramify-markdown>=1.2

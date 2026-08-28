@@ -73,6 +73,25 @@ class GeminiClient:
         if effective_system_prompt:
             config_kwargs["system_instruction"] = effective_system_prompt
 
+        config_kwargs["safety_settings"] = [
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+        ]
+
         if want_audio:
             config_kwargs["response_modalities"] = ["AUDIO", "TEXT"]
             config_kwargs["speech_config"] = types.SpeechConfig(

@@ -1,16 +1,19 @@
+import asyncio
 import hashlib
 import html
 import io
 import logging
 from typing import Optional, Sequence, Union
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     ChosenInlineResult,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
@@ -673,10 +676,114 @@ async def handle_document(message: Message) -> None:
         force_voice_reply=False,
     )
 
-
 # --- Inline mode (без сжигания квоты при наборе текста) ---
 
 INLINE_ANSWER_LIMIT = 3900
+
+# Временный кэш промптов (result_id -> raw_query) для inline-генерации
+_pending_inline_prompts: dict[str, str] = {}
+
+
+async def _execute_inline_generation(
+    bot: Bot,
+    user_id: int,
+    raw_query: str,
+    inline_message_id: str,
+) -> None:
+    """Генерирует ответ Gemini и редактирует отправленное инлайн-сообщение."""
+    async with user_locks.get(user_id):
+        limit_status = await limiter.check(user_id)
+        if not limit_status.allowed:
+            wait_seconds = int(limit_status.retry_after) + 1
+            try:
+                await bot.edit_message_text(
+                    text=(
+                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                        f"⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
+                    ),
+                    inline_message_id=inline_message_id,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        state = await storage.get(user_id)
+
+        try:
+            # Inline-запросы выполняются как изолированные разовые обращения
+            response = await gemini_client.ask(
+                model=state.model,
+                history_turns=[],
+                message=raw_query,
+                system_prompt=state.system_prompt,
+                want_audio=False,
+            )
+        except GeminiError as exc:
+            try:
+                await bot.edit_message_text(
+                    text=(
+                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                        f"⚠️ <i>Ошибка Gemini: {html.escape(str(exc))}</i>"
+                    ),
+                    inline_message_id=inline_message_id,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except TelegramBadRequest:
+                pass
+            return
+        except Exception:
+            logger.exception("Unexpected error in inline generation")
+            try:
+                await bot.edit_message_text(
+                    text=(
+                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                        "⚠️ <i>Непредвиденная ошибка при генерации ответа.</i>"
+                    ),
+                    inline_message_id=inline_message_id,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        await limiter.hit(user_id)
+
+    # Оформляем цитату исходного запроса в начале сообщения без указания ника
+    full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")
+
+    if utf16_len(full_text) > INLINE_ANSWER_LIMIT:
+        cut = find_utf16_cut(full_text, INLINE_ANSWER_LIMIT)
+        full_text = (
+            full_text[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше задавать в личку боту)"
+        )
+
+    if state.rich_mode:
+        chunks = markdown_to_chunks(full_text, max_len=INLINE_ANSWER_LIMIT)
+        if chunks:
+            chunk_text, chunk_entities = chunks[0]
+            try:
+                await bot.edit_message_text(
+                    text=chunk_text,
+                    entities=chunk_entities,
+                    inline_message_id=inline_message_id,
+                    reply_markup=None,
+                )
+                return
+            except TelegramBadRequest:
+                pass
+
+    try:
+        await bot.edit_message_text(
+            text=full_text,
+            inline_message_id=inline_message_id,
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        pass
 
 
 @router.inline_query()
@@ -702,12 +809,33 @@ async def handle_inline(query: InlineQuery) -> None:
 
     # Не вызываем Gemini API при вводе текста, отдаём карточку мгновенно!
     result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
+    _pending_inline_prompts[result_id] = raw_query
+
+    # Ограничиваем размер кэша
+    if len(_pending_inline_prompts) > 1000:
+        for k in list(_pending_inline_prompts.keys())[:200]:
+            _pending_inline_prompts.pop(k, None)
+
     prompt_short = raw_query[:80] + ("…" if len(raw_query) > 80 else "")
+
+    # ВАЖНО: Telegram присваивает inline_message_id и позволяет редактировать сообщение
+    # ТОЛЬКО ЕСЛИ к сообщению прикреплена инлайн-клавиатура (reply_markup)!
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⏳ Генерирую ответ...",
+                    callback_data=f"inline_gen:{result_id}",
+                )
+            ]
+        ]
+    )
 
     article = InlineQueryResultArticle(
         id=result_id,
         title="💬 Отправить запрос к Gemini",
         description=f"«{prompt_short}» (нажмите, чтобы сгенерировать ответ)",
+        reply_markup=keyboard,
         input_message_content=InputTextMessageContent(
             message_text=(
                 f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
@@ -730,100 +858,41 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     if not chosen.inline_message_id:
         return
 
-    user_id = chosen.from_user.id
-    raw_query = chosen.query.strip()
+    raw_query = chosen.query.strip() or _pending_inline_prompts.get(chosen.result_id, "")
     if not raw_query:
         return
 
-    inline_msg_id = chosen.inline_message_id
-
-    async with user_locks.get(user_id):
-        limit_status = await limiter.check(user_id)
-        if not limit_status.allowed:
-            wait_seconds = int(limit_status.retry_after) + 1
-            try:
-                await chosen.bot.edit_message_text(
-                    text=(
-                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                        f"⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
-                    ),
-                    inline_message_id=inline_msg_id,
-                    parse_mode="HTML",
-                )
-            except TelegramBadRequest:
-                pass
-            return
-
-        state = await storage.get(user_id)
-
-        try:
-            # Inline-запросы выполняются как изолированные разовые обращения (без контекста лички)
-            response = await gemini_client.ask(
-                model=state.model,
-                history_turns=[],
-                message=raw_query,
-                system_prompt=state.system_prompt,
-                want_audio=False,
-            )
-        except GeminiError as exc:
-            try:
-                await chosen.bot.edit_message_text(
-                    text=(
-                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                        f"⚠️ <i>Ошибка Gemini: {html.escape(str(exc))}</i>"
-                    ),
-                    inline_message_id=inline_msg_id,
-                    parse_mode="HTML",
-                )
-            except TelegramBadRequest:
-                pass
-            return
-        except Exception:
-            logger.exception("Unexpected error in chosen_inline_result")
-            try:
-                await chosen.bot.edit_message_text(
-                    text=(
-                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                        "⚠️ <i>Непредвиденная ошибка при генерации ответа.</i>"
-                    ),
-                    inline_message_id=inline_msg_id,
-                    parse_mode="HTML",
-                )
-            except TelegramBadRequest:
-                pass
-            return
-
-        await limiter.hit(user_id)
-
-    # Оформляем цитату исходного запроса в начале сообщения без указания ника
-    full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")
-
-    if utf16_len(full_text) > INLINE_ANSWER_LIMIT:
-        cut = find_utf16_cut(full_text, INLINE_ANSWER_LIMIT)
-        full_text = (
-            full_text[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше задавать в личку боту)"
+    asyncio.create_task(
+        _execute_inline_generation(
+            bot=chosen.bot,
+            user_id=chosen.from_user.id,
+            raw_query=raw_query,
+            inline_message_id=chosen.inline_message_id,
         )
+    )
 
-    if state.rich_mode:
-        chunks = markdown_to_chunks(full_text, max_len=INLINE_ANSWER_LIMIT)
-        if chunks:
-            chunk_text, chunk_entities = chunks[0]
-            try:
-                await chosen.bot.edit_message_text(
-                    text=chunk_text,
-                    entities=chunk_entities,
-                    inline_message_id=inline_msg_id,
-                )
-                return
-            except TelegramBadRequest:
-                pass
 
-    try:
-        await chosen.bot.edit_message_text(
-            text=full_text,
-            inline_message_id=inline_msg_id,
+@router.callback_query(F.data.startswith("inline_gen:"))
+async def cb_inline_gen(callback: CallbackQuery) -> None:
+    """Fallback-хендлер на случай, если chosen_inline_result задерживается или отключен в BotFather."""
+    if not callback.inline_message_id:
+        await callback.answer("Ошибка: сообщение устарело", show_alert=True)
+        return
+
+    result_id = callback.data.split(":", 1)[1]
+    raw_query = _pending_inline_prompts.get(result_id, "")
+    if not raw_query:
+        await callback.answer("Генерирую...")
+        return
+
+    await callback.answer("Генерация запущена...")
+    asyncio.create_task(
+        _execute_inline_generation(
+            bot=callback.bot,
+            user_id=callback.from_user.id,
+            raw_query=raw_query,
+            inline_message_id=callback.inline_message_id,
         )
-    except TelegramBadRequest:
-        pass
+    )
 
 

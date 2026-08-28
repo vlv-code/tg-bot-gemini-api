@@ -38,7 +38,7 @@ async def main() -> None:
     logging.info("Бот запущен, доступные модели: %s", settings.available_models)
 
     try:
-        await dispatcher.start_polling(bot)
+        await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
         await storage.close()
 

@@ -10,6 +10,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    ChosenInlineResult,
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
@@ -42,6 +43,7 @@ router = Router()
 router.message.outer_middleware(AccessMiddleware())
 router.callback_query.outer_middleware(AccessMiddleware())
 router.inline_query.outer_middleware(AccessMiddleware())
+router.chosen_inline_result.outer_middleware(AccessMiddleware())
 
 storage = UserStorage(
     db_path=settings.db_path,
@@ -114,14 +116,28 @@ def _render_prompt_menu_text(state: UserState) -> str:
     )
 
 
+def _format_with_prompt_quote(prompt: str, response_text: str) -> str:
+    """Оформляет исходный запрос цитатой в начале ответа без указания ника."""
+    if not prompt:
+        return response_text
+
+    # Формируем цитату исходного запроса (Markdown blockquote)
+    lines = prompt.strip().split("\n")
+    quoted_lines = [f"> {line}" for line in lines]
+    quote_block = "\n".join(quoted_lines)
+
+    return f"{quote_block}\n\n{response_text}"
+
+
 async def _send_response(
     message: Message,
     state: UserState,
     response: GeminiResponse,
     user_id: int,
+    prompt_text: str = "",
     force_voice: bool = False,
 ) -> None:
-    """Отправляет ответ пользователю (голосовое сообщение и/или текст)."""
+    """Отправляет ответ пользователю (голосовое сообщение и/или текст с цитатой запроса)."""
     if (state.voice_mode or force_voice) and response.audio_bytes:
         try:
             voice_file = BufferedInputFile(response.audio_bytes, filename="voice.ogg")
@@ -130,18 +146,20 @@ async def _send_response(
             logger.exception("Не удалось отправить голосовое сообщение, переключаемся на текст")
 
     if response.text:
+        full_text = _format_with_prompt_quote(prompt_text, response.text)
         if state.rich_mode:
-            for chunk_text, chunk_entities in markdown_to_chunks(response.text):
+            for chunk_text, chunk_entities in markdown_to_chunks(full_text):
                 try:
                     await message.answer(chunk_text, entities=chunk_entities)
                 except Exception:
                     logger.warning("Ошибка отправки с entities, отправляем чистым текстом")
                     await message.answer(chunk_text)
         else:
-            for chunk in split_plain_text(response.text):
+            for chunk in split_plain_text(full_text):
                 await message.answer(chunk)
 
     await message.answer(await _limits_line(user_id))
+
 
 
 # --- Команды бота ---
@@ -561,6 +579,7 @@ async def _process_user_turn(
             state=state,
             response=response,
             user_id=user_id,
+            prompt_text=history_text,
             force_voice=force_voice_reply,
         )
 
@@ -641,55 +660,84 @@ async def handle_document(message: Message) -> None:
     )
 
 
-# --- Inline mode ---
+# --- Inline mode (без сжигания квоты при наборе текста) ---
 
-INLINE_ANSWER_LIMIT = 4000
-
-
-def _inline_result(result_id: str, title: str, text: str) -> InlineQueryResultArticle:
-    return InlineQueryResultArticle(
-        id=result_id,
-        title=title,
-        description=text[:120].replace("\n", " "),
-        input_message_content=InputTextMessageContent(message_text=text),
-    )
+INLINE_ANSWER_LIMIT = 3900
 
 
 @router.inline_query()
 async def handle_inline(query: InlineQuery) -> None:
-    user_id = query.from_user.id
-    text = query.query.strip()
-    result_id = hashlib.sha1(f"{user_id}:{text}".encode()).hexdigest()[:32]
-
-    if not text:
+    raw_query = query.query.strip()
+    if not raw_query:
+        # Если запрос пустой, подсказываем формат использования
+        help_article = InlineQueryResultArticle(
+            id="inline_help",
+            title="💬 Задайте вопрос Gemini...",
+            description="Наберите текст запроса: @bot_username ваш вопрос",
+            input_message_content=InputTextMessageContent(
+                message_text="Чтобы задать вопрос Gemini в любом чате, наберите: <code>@bot_username ваш вопрос</code>",
+                parse_mode="HTML",
+            ),
+        )
         await query.answer(
-            results=[
-                _inline_result(
-                    "hint",
-                    "Введи вопрос для Gemini",
-                    f"Например: @{(await query.bot.get_me()).username} как настроить бэкап Zabbix",
-                )
-            ],
+            results=[help_article],
             cache_time=0,
             is_personal=True,
         )
         return
 
+    # Не вызываем Gemini API при вводе текста, отдаём карточку мгновенно!
+    result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
+    prompt_short = raw_query[:80] + ("…" if len(raw_query) > 80 else "")
+
+    article = InlineQueryResultArticle(
+        id=result_id,
+        title="💬 Отправить запрос к Gemini",
+        description=f"«{prompt_short}» (нажмите, чтобы сгенерировать ответ)",
+        input_message_content=InputTextMessageContent(
+            message_text=(
+                f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                "⏳ <i>Генерирую ответ от Gemini...</i>"
+            ),
+            parse_mode="HTML",
+        ),
+    )
+
+    await query.answer(
+        results=[article],
+        cache_time=0,
+        is_personal=True,
+    )
+
+
+@router.chosen_inline_result()
+async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
+    """Срабатывает ровно в момент, когда пользователь кликнул карточку и отправил сообщение."""
+    if not chosen.inline_message_id:
+        return
+
+    user_id = chosen.from_user.id
+    raw_query = chosen.query.strip()
+    if not raw_query:
+        return
+
+    inline_msg_id = chosen.inline_message_id
+
     async with user_locks.get(user_id):
         limit_status = await limiter.check(user_id)
         if not limit_status.allowed:
             wait_seconds = int(limit_status.retry_after) + 1
-            await query.answer(
-                results=[
-                    _inline_result(
-                        result_id,
-                        "⏳ Лимит запросов исчерпан",
-                        f"Попробуй снова через {wait_seconds} сек.",
-                    )
-                ],
-                cache_time=0,
-                is_personal=True,
-            )
+            try:
+                await chosen.bot.edit_message_text(
+                    text=(
+                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                        f"⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
+                    ),
+                    inline_message_id=inline_msg_id,
+                    parse_mode="HTML",
+                )
+            except TelegramBadRequest:
+                pass
             return
 
         state = await storage.get(user_id)
@@ -698,48 +746,72 @@ async def handle_inline(query: InlineQuery) -> None:
             response = await gemini_client.ask(
                 model=state.model,
                 history_turns=state.history,
-                message=text,
+                message=raw_query,
                 system_prompt=state.system_prompt,
                 want_audio=False,
             )
         except GeminiError as exc:
-            await query.answer(
-                results=[_inline_result(result_id, "⚠️ Ошибка Gemini", str(exc))],
-                cache_time=0,
-                is_personal=True,
-            )
+            try:
+                await chosen.bot.edit_message_text(
+                    text=(
+                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                        f"⚠️ <i>Ошибка Gemini: {html.escape(str(exc))}</i>"
+                    ),
+                    inline_message_id=inline_msg_id,
+                    parse_mode="HTML",
+                )
+            except TelegramBadRequest:
+                pass
             return
         except Exception:
-            logger.exception("Unexpected error while calling Gemini API (inline)")
-            await query.answer(
-                results=[
-                    _inline_result(
-                        result_id,
-                        "⚠️ Непредвиденная ошибка",
-                        "Ошибка при обращении к Gemini API.",
-                    )
-                ],
-                cache_time=0,
-                is_personal=True,
-            )
+            logger.exception("Unexpected error in chosen_inline_result")
+            try:
+                await chosen.bot.edit_message_text(
+                    text=(
+                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                        "⚠️ <i>Непредвиденная ошибка при генерации ответа.</i>"
+                    ),
+                    inline_message_id=inline_msg_id,
+                    parse_mode="HTML",
+                )
+            except TelegramBadRequest:
+                pass
             return
 
         await limiter.hit(user_id)
-        await storage.add_turn(user_id, "user", text)
+        await storage.add_turn(user_id, "user", raw_query)
         if response.text:
             await storage.add_turn(user_id, "model", response.text)
 
-    display_answer = response.text or "Готово."
-    title = display_answer.replace("\n", " ")[:80] or "Ответ"
-    if utf16_len(display_answer) > INLINE_ANSWER_LIMIT:
-        cut = find_utf16_cut(display_answer, INLINE_ANSWER_LIMIT)
-        display_answer = (
-            display_answer[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше в личку боту)"
+    # Оформляем цитату исходного запроса в начале сообщения без указания ника
+    full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")
+
+    if utf16_len(full_text) > INLINE_ANSWER_LIMIT:
+        cut = find_utf16_cut(full_text, INLINE_ANSWER_LIMIT)
+        full_text = (
+            full_text[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше задавать в личку боту)"
         )
 
-    await query.answer(
-        results=[_inline_result(result_id, title, display_answer)],
-        cache_time=0,
-        is_personal=True,
-    )
+    if state.rich_mode:
+        chunks = markdown_to_chunks(full_text, max_len=INLINE_ANSWER_LIMIT)
+        if chunks:
+            chunk_text, chunk_entities = chunks[0]
+            try:
+                await chosen.bot.edit_message_text(
+                    text=chunk_text,
+                    entities=chunk_entities,
+                    inline_message_id=inline_msg_id,
+                )
+                return
+            except TelegramBadRequest:
+                pass
+
+    try:
+        await chosen.bot.edit_message_text(
+            text=full_text,
+            inline_message_id=inline_msg_id,
+        )
+    except TelegramBadRequest:
+        pass
+
 

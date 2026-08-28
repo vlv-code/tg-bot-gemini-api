@@ -6,8 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Устанавливаем gosu для безопасного сброса root-прав после настройки прав на volume
-RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
+# Устанавливаем gosu и ffmpeg для безопасного сброса root-прав и кодирования аудио OGG Opus
+RUN apt-get update && apt-get install -y --no-install-recommends gosu ffmpeg && rm -rf /var/lib/apt/lists/*
 
 # сначала только requirements — чтобы пересборка кода не дёргала pip install каждый раз
 COPY requirements.txt .

@@ -19,6 +19,7 @@ from aiogram.types import (
 from aiogram.utils.chat_action import ChatActionSender
 from google.genai import types
 
+from audio import convert_gemini_audio
 from config import settings
 from formatting import find_utf16_cut, markdown_to_chunks, split_plain_text, utf16_len
 from gemini_client import GeminiError, GeminiResponse, build_gemini_client
@@ -83,7 +84,7 @@ def _render_main_menu_text(state: UserState) -> str:
         f"• <b>Голосовые ответы:</b> {voice_str}\n"
         f"• <b>Rich-разметка:</b> {rich_str}\n"
         f"• <b>Системный промпт:</b> {prompt_status}\n"
-        f"• <b>Контекст диалога:</b> {history_count} реплик в памяти\n\n"
+        f"• <b>Контекст диалога:</b> {history_count} реплик в памяти этого чата\n\n"
         "<i>Используйте кнопки ниже для быстрой настройки без спама в чате:</i>"
     )
 
@@ -140,7 +141,8 @@ async def _send_response(
     """Отправляет ответ пользователю (голосовое сообщение и/или текст с цитатой запроса)."""
     if (state.voice_mode or force_voice) and response.audio_bytes:
         try:
-            voice_file = BufferedInputFile(response.audio_bytes, filename="voice.ogg")
+            audio_data, audio_filename, _ = convert_gemini_audio(response.audio_bytes)
+            voice_file = BufferedInputFile(audio_data, filename=audio_filename)
             await message.answer_voice(voice_file)
         except Exception:
             logger.exception("Не удалось отправить голосовое сообщение, переключаемся на текст")
@@ -261,7 +263,8 @@ async def cmd_tts(message: Message) -> None:
 
             await limiter.hit(user_id)
 
-        voice_file = BufferedInputFile(audio_bytes, filename="tts.ogg")
+        audio_data, audio_filename, _ = convert_gemini_audio(audio_bytes)
+        voice_file = BufferedInputFile(audio_data, filename=audio_filename)
         await message.answer_voice(voice_file)
 
 
@@ -308,7 +311,7 @@ async def cb_menu_model(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("set_model:") | F.data.startswith("model:"))
+@router.callback_query(F.data.startswith(("set_model:", "model:")))
 async def cb_set_model(callback: CallbackQuery) -> None:
     model = callback.data.split(":", 1)[1]
     if model not in settings.available_models:
@@ -470,7 +473,7 @@ async def cb_toggle_voice(callback: CallbackQuery) -> None:
     await callback.answer("Голосовые ответы: " + ("включены" if voice else "выключены"))
 
 
-@router.callback_query(F.data == "clear_history" | F.data == "menu:clear_hist")
+@router.callback_query(F.data.in_({"clear_history", "menu:clear_hist"}))
 async def cb_clear_history(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     await storage.clear_history(callback.from_user.id, chat_id=chat_id)
@@ -519,7 +522,7 @@ async def cb_reset_prompt(callback: CallbackQuery) -> None:
     await callback.answer("Промпт сброшен к дефолтному ✅")
 
 
-@router.callback_query(F.data == "menu:limits" | F.data == "refresh_limits")
+@router.callback_query(F.data.in_({"menu:limits", "refresh_limits"}))
 async def cb_menu_limits(callback: CallbackQuery) -> None:
     status_line = await _limits_line(callback.from_user.id)
     try:

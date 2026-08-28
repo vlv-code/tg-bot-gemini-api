@@ -8,12 +8,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="🤖 Модель Gemini", callback_data="menu:model")],
         [InlineKeyboardButton(text="🎙 Настройки озвучки (TTS)", callback_data="menu:tts")],
-        [InlineKeyboardButton(text="⚙️ Параметры чата", callback_data="menu:settings")],
+        [InlineKeyboardButton(text="⚙️ Параметры чата и история", callback_data="menu:settings")],
         [InlineKeyboardButton(text="📝 Системный промпт", callback_data="menu:prompt")],
-        [
-            InlineKeyboardButton(text="📊 Лимиты", callback_data="menu:limits"),
-            InlineKeyboardButton(text="🗑 Очистить историю", callback_data="menu:clear_hist"),
-        ],
+        [InlineKeyboardButton(text="📊 Лимиты запросов", callback_data="menu:limits")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 

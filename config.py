@@ -41,8 +41,8 @@ class Settings:
     # Путь к файлу SQLite базы данных
     db_path: str = os.getenv("DB_PATH", "data/bot.db")
 
-    # Модель для TTS генерации речи (gemini-3.1-flash-tts, gemini-2.5-flash-tts)
-    tts_model: str = os.getenv("TTS_MODEL", "gemini-3.1-flash-tts")
+    # Модель для TTS генерации речи (gemini-2.5-flash)
+    tts_model: str = os.getenv("TTS_MODEL", "gemini-2.5-flash")
 
     # Пресет голоса для Gemini Audio / TTS (Puck, Charon, Kore, Fenrir, Aoede)
     tts_voice: str = os.getenv("TTS_VOICE", "Aoede")

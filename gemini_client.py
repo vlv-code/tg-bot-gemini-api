@@ -37,7 +37,7 @@ class GeminiClient:
         api_key: str,
         default_system_prompt: str = "",
         default_voice: str = "Aoede",
-        default_tts_model: str = "gemini-3.1-flash-tts",
+        default_tts_model: str = "gemini-2.5-flash",
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self.default_system_prompt = default_system_prompt
@@ -138,31 +138,46 @@ class GeminiClient:
     ) -> bytes:
         """Синтезирует речь из текста (TTS) с помощью аудио-модальности Gemini."""
         effective_voice = voice_name or self.default_voice
-        target_model = model or self.default_tts_model
-        config = types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=effective_voice
-                    )
-                )
-            ),
-        )
-        try:
-            response = await self._client.aio.models.generate_content(
-                model=target_model,
-                contents=f"Прочитай следующий текст:\n\n{text}",
-                config=config,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise GeminiError(self._friendly_message(exc)) from exc
 
-        if response.candidates and response.candidates[0].content:
-            for part in response.candidates[0].content.parts:
-                inline_data = getattr(part, "inline_data", None)
-                if inline_data and getattr(inline_data, "data", None):
-                    return inline_data.data
+        # Формируем цепочку моделей для попытки генерации речи
+        models_to_try: list[str] = []
+        if model and model not in models_to_try:
+            models_to_try.append(model)
+        if self.default_tts_model and self.default_tts_model not in models_to_try:
+            models_to_try.append(self.default_tts_model)
+        for fallback in ("gemini-2.5-flash", "gemini-2.0-flash"):
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
+        last_error = None
+        for target_model in models_to_try:
+            config = types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=effective_voice
+                        )
+                    )
+                ),
+            )
+            try:
+                response = await self._client.aio.models.generate_content(
+                    model=target_model,
+                    contents=f"Прочитай следующий текст:\n\n{text}",
+                    config=config,
+                )
+                if response.candidates and response.candidates[0].content:
+                    for part in response.candidates[0].content.parts:
+                        inline_data = getattr(part, "inline_data", None)
+                        if inline_data and getattr(inline_data, "data", None):
+                            return inline_data.data
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                continue
+
+        if last_error is not None:
+            raise GeminiError(self._friendly_message(last_error)) from last_error
 
         raise GeminiError("Не удалось сгенерировать аудио из текста.")
 
@@ -183,7 +198,7 @@ def build_gemini_client(
     api_key: str,
     default_system_prompt: str = "",
     default_voice: str = "Aoede",
-    default_tts_model: str = "gemini-3.1-flash-tts",
+    default_tts_model: str = "gemini-2.5-flash",
 ) -> GeminiClient:
     return GeminiClient(
         api_key=api_key,
@@ -191,4 +206,5 @@ def build_gemini_client(
         default_voice=default_voice,
         default_tts_model=default_tts_model,
     )
+
 

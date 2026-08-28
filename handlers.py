@@ -1294,7 +1294,7 @@ async def handle_inline(query: InlineQuery) -> None:
         for k in list(_pending_inline_prompts.keys())[:200]:
             _pending_inline_prompts.pop(k, None)
 
-    # Режим 1: Озвучка текста (/tts или tts) -> отправка реального ГС в чат!
+    # Режим 1: Озвучка текста (/tts или tts) -> генерация только после отправки в чат
     if raw_query.lower().startswith(("/tts", "tts")):
         parts = raw_query.split(maxsplit=1)
         tts_text = parts[1].strip() if len(parts) > 1 else ""
@@ -1312,46 +1312,11 @@ async def handle_inline(query: InlineQuery) -> None:
             return
 
         prompt_short = tts_text[:70] + ("…" if len(tts_text) > 70 else "")
-        cache_key = f"{tts_text}_{query.from_user.id}"
-        voice_file_id = _tts_voice_cache.get(cache_key)
-
-        if not voice_file_id:
-            try:
-                state = await storage.get(query.from_user.id)
-                audio_bytes = await gemini_client.generate_speech(
-                    text=tts_text,
-                    voice_name=state.tts_voice,
-                    model=state.tts_model,
-                )
-                audio_data, audio_filename, _ = convert_gemini_audio(audio_bytes)
-                voice_file = BufferedInputFile(audio_data, filename=audio_filename)
-                upload_msg = await query.bot.send_voice(
-                    chat_id=query.from_user.id,
-                    voice=voice_file,
-                    caption=f"🎙 Озвучка: {tts_text[:120]}",
-                )
-                if upload_msg.voice:
-                    voice_file_id = upload_msg.voice.file_id
-                    _tts_voice_cache[cache_key] = voice_file_id
-            except Exception:
-                logger.debug("Не удалось предзагрузить voice_file_id (возможно, бот не запущен в ЛС)")
-
-        if voice_file_id:
-            voice_result = InlineQueryResultCachedVoice(
-                id=result_id,
-                voice_file_id=voice_file_id,
-                title=f"🎙 Отправить ГС: «{prompt_short}»",
-                caption=f"🎙 {tts_text}",
-            )
-            await query.answer(results=[voice_result], cache_time=30, is_personal=True)
-            return
-
-        # Fallback (если пользователь не нажимал старт в ЛС с ботом)
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="🎙 Сгенерировать озвучку",
+                        text="🎙 Синтезирую голосовое...",
                         callback_data=f"inline_tts:{result_id}",
                     )
                 ]
@@ -1360,7 +1325,7 @@ async def handle_inline(query: InlineQuery) -> None:
         article = InlineQueryResultArticle(
             id=result_id,
             title="🎙 Озвучить текст (TTS)",
-            description=f"«{prompt_short}» (нажмите для генерации)",
+            description=f"«{prompt_short}» (нажмите для отправки и озвучки)",
             reply_markup=keyboard,
             input_message_content=InputTextMessageContent(
                 message_text=(

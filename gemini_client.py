@@ -65,7 +65,9 @@ class GeminiClient:
         """Отправляет сообщение в Gemini с учётом истории диалога."""
         history = self._build_history(history_turns)
         effective_system_prompt = (
-            system_prompt if system_prompt is not None else self.default_system_prompt
+            system_prompt.strip()
+            if (system_prompt and system_prompt.strip())
+            else self.default_system_prompt
         )
         effective_voice = voice_name or self.default_voice
 

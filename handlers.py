@@ -5,7 +5,6 @@ import io
 import ipaddress
 import logging
 import re
-import socket
 from typing import Optional, Sequence, Union
 import urllib.parse
 
@@ -72,17 +71,19 @@ async def try_download_image_from_url(url: str) -> Optional[tuple[bytes, str]]:
             ip_str = sockaddr[0]
             ip = ipaddress.ip_address(ip_str)
             if (
-                ip.is_private
+                ip.is_unspecified
+                or ip.is_private
                 or ip.is_loopback
                 or ip.is_link_local
                 or ip.is_reserved
                 or ip.is_multicast
             ):
-                logger.warning("Заблокирован SSRF-запрос к приватному адресу %s (%s)", parsed.hostname, ip_str)
+                logger.warning("Заблокирован SSRF-запрос к адресу %s (%s)", parsed.hostname, ip_str)
                 return None
 
         max_bytes = 15 * 1024 * 1024
-        async with aiohttp.ClientSession() as session:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; GeminiTelegramBot/1.0)"}
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), allow_redirects=False) as resp:
                 if resp.status == 200:
                     content_type = resp.headers.get("Content-Type", "").lower()
@@ -101,8 +102,8 @@ async def try_download_image_from_url(url: str) -> Optional[tuple[bytes, str]]:
                         chunks.append(chunk)
 
                     return b"".join(chunks), mime
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Не удалось скачать изображение по ссылке %s: %s", url, exc)
     return None
 
 
@@ -1052,14 +1053,18 @@ async def cb_admin_users(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("admin:del_user:"))
 async def cb_admin_del_user(callback: CallbackQuery) -> None:
-    if not await storage.is_user_admin(callback.from_user.id):
+    caller_id = callback.from_user.id
+    if not await storage.is_user_admin(caller_id):
         await callback.answer("⛔️ Доступ запрещён", show_alert=True)
         return
     target_id_str = callback.data.split(":", 2)[2]
     try:
         target_id = int(target_id_str)
-        if target_id in settings.admin_ids and target_id == callback.from_user.id:
-            await callback.answer("Нельзя удалить самого себя из супер-админов!", show_alert=True)
+        if target_id in settings.admin_ids:
+            await callback.answer("⛔️ Нельзя удалить суперадминистратора!", show_alert=True)
+            return
+        if await storage.is_user_admin(target_id) and caller_id not in settings.admin_ids:
+            await callback.answer("⛔️ Только суперадмин может удалять других администраторов!", show_alert=True)
             return
         await storage.remove_allowed_user(target_id)
         await callback.answer(f"Пользователь {target_id} удалён ✅")
@@ -1088,7 +1093,7 @@ async def cb_admin_add_user_hint(callback: CallbackQuery) -> None:
         "➕ <b>Добавление пользователя:</b>\n\n"
         "Отправьте команду:\n"
         "• <code>/adduser 123456789 username</code> — добавить обычного пользователя\n"
-        "• <code>/addadmin 123456789 username</code> — добавить администратора\n\n"
+        "• <code>/addadmin 123456789 username</code> — добавить администратора (только для суперадмина)\n\n"
         "<i>User ID можно узнать, переслав сообщение пользователя в бот @userinfobot.</i>",
         parse_mode="HTML",
     )
@@ -1097,7 +1102,8 @@ async def cb_admin_add_user_hint(callback: CallbackQuery) -> None:
 
 @router.message(Command("adduser", "addadmin"))
 async def cmd_adduser(message: Message) -> None:
-    if not await storage.is_user_admin(message.from_user.id):
+    caller_id = message.from_user.id
+    if not await storage.is_user_admin(caller_id):
         await message.answer("⛔️ У вас нет прав администратора.")
         return
     args = message.text.split() if message.text else []
@@ -1114,11 +1120,16 @@ async def cmd_adduser(message: Message) -> None:
         return
     username = args[2] if len(args) > 2 else ""
     is_admin = args[0].lower().startswith("/addadmin")
+
+    if is_admin and caller_id not in settings.admin_ids:
+        await message.answer("⛔️ Только главный суперадминистратор может назначать других администраторов.")
+        return
+
     await storage.add_allowed_user(
         user_id=target_uid,
         username=username,
         is_admin=is_admin,
-        added_by=message.from_user.id,
+        added_by=caller_id,
     )
     role_text = "Администратор" if is_admin else "Пользователь"
     await message.answer(
@@ -1129,7 +1140,8 @@ async def cmd_adduser(message: Message) -> None:
 
 @router.message(Command("deluser"))
 async def cmd_deluser(message: Message) -> None:
-    if not await storage.is_user_admin(message.from_user.id):
+    caller_id = message.from_user.id
+    if not await storage.is_user_admin(caller_id):
         await message.answer("⛔️ У вас нет прав администратора.")
         return
     args = message.text.split() if message.text else []
@@ -1141,8 +1153,11 @@ async def cmd_deluser(message: Message) -> None:
     except ValueError:
         await message.answer("⚠️ ID пользователя должен быть числом.")
         return
-    if target_uid in settings.admin_ids and target_uid == message.from_user.id:
-        await message.answer("⚠️ Нельзя удалить самого себя из супер-админов.")
+    if target_uid in settings.admin_ids:
+        await message.answer("⛔️ Нельзя удалить суперадминистратора.")
+        return
+    if await storage.is_user_admin(target_uid) and caller_id not in settings.admin_ids:
+        await message.answer("⛔️ Только суперадмин может удалять других администраторов.")
         return
     removed = await storage.remove_allowed_user(target_uid)
     if removed:
@@ -1435,8 +1450,8 @@ INLINE_ANSWER_LIMIT = 3900
 
 # Временный кэш промптов (result_id -> raw_query) для inline-генерации
 _pending_inline_prompts: dict[str, str] = {}
-# Кэш voice_file_id для отправки реальных ГС прямо в чат через InlineQueryResultCachedVoice
-_tts_voice_cache: dict[str, str] = {}
+# Активные задачи debounce для инлайн TTS (user_id -> query_token)
+_active_inline_tts_tasks: dict[int, str] = {}
 
 
 async def _execute_inline_tts_generation(

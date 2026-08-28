@@ -11,13 +11,6 @@ from typing import Optional, Sequence, Union
 from google import genai
 from google.genai import types
 
-try:
-    # структура ошибок SDK может отличаться между версиями,
-    # поэтому подстраховываемся и ниже проверяем несколько атрибутов
-    from google.genai import errors as genai_errors
-except ImportError:  # pragma: no cover
-    genai_errors = None
-
 from storage import Turn
 
 

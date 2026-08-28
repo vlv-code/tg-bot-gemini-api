@@ -4,6 +4,7 @@
 вызывающим кодом (хранится в storage.py).
 """
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional, Sequence, Union
@@ -12,6 +13,8 @@ from google import genai
 from google.genai import types
 
 from storage import Turn
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiError(Exception):
@@ -188,7 +191,7 @@ class GeminiClient:
         last_error = None
         for target_model in models_to_try:
             config = types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
+                response_modalities=["AUDIO", "TEXT"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -198,6 +201,7 @@ class GeminiClient:
                 ),
             )
             try:
+                logger.info("Генерация TTS для текста (%d симв.) голосом %s через модель %s...", len(text), effective_voice, target_model)
                 response = await self._client.aio.models.generate_content(
                     model=target_model,
                     contents=f"Прочитай следующий текст:\n\n{text}",
@@ -207,8 +211,11 @@ class GeminiClient:
                     for part in response.candidates[0].content.parts:
                         inline_data = getattr(part, "inline_data", None)
                         if inline_data and getattr(inline_data, "data", None):
-                            return inline_data.data
+                            audio_bytes = inline_data.data
+                            logger.info("TTS успешно сгенерирован через модель %s (%d байт)", target_model, len(audio_bytes))
+                            return audio_bytes
             except Exception as exc:  # noqa: BLE001
+                logger.warning("Попытка TTS через модель %s не удалась: %s", target_model, exc)
                 last_error = exc
                 continue
 

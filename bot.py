@@ -25,7 +25,11 @@ BOT_COMMANDS = [
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     # Инициализируем базу данных SQLite
     await storage.init_db()

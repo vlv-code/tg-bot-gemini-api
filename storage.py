@@ -5,6 +5,7 @@
 лишних SELECT-запросов.
 """
 
+import asyncio
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -33,23 +34,30 @@ class UserStorage:
         self._default_model = default_model
         self._max_history = max_history
         self._db: Optional[aiosqlite.Connection] = None
+        self._init_lock = asyncio.Lock()
 
     async def init_db(self) -> None:
         """Инициализирует постоянное соединение с базой данных, WAL-режим и таблицы."""
-        dirname = os.path.dirname(self._db_path)
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)
+        if self._db is not None:
+            return
 
-        if self._db is None:
-            self._db = await aiosqlite.connect(self._db_path)
-            self._db.row_factory = aiosqlite.Row
+        async with self._init_lock:
+            if self._db is not None:
+                return
+
+            dirname = os.path.dirname(self._db_path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+
+            db = await aiosqlite.connect(self._db_path)
+            db.row_factory = aiosqlite.Row
 
             # WAL режим и таймаут ожидания лока для параллельной работы хендлеров
-            await self._db.execute("PRAGMA journal_mode = WAL;")
-            await self._db.execute("PRAGMA synchronous = NORMAL;")
-            await self._db.execute("PRAGMA busy_timeout = 5000;")
+            await db.execute("PRAGMA journal_mode = WAL;")
+            await db.execute("PRAGMA synchronous = NORMAL;")
+            await db.execute("PRAGMA busy_timeout = 5000;")
 
-            await self._db.execute(
+            await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -61,7 +69,7 @@ class UserStorage:
                 )
                 """
             )
-            await self._db.execute(
+            await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,16 +80,19 @@ class UserStorage:
                 )
                 """
             )
-            await self._db.execute(
+            await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_user_id ON history (user_id, id)"
             )
-            await self._db.commit()
+            await db.commit()
+
+            self._db = db
 
     async def close(self) -> None:
         """Закрывает постоянное соединение с базой данных."""
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        async with self._init_lock:
+            if self._db is not None:
+                await self._db.close()
+                self._db = None
 
     async def _ensure_db(self) -> aiosqlite.Connection:
         if self._db is None:

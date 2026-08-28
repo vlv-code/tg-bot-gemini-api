@@ -117,6 +117,24 @@ class UserStorage:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_chat_user ON history (chat_id, user_id, id)"
             )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS token_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL DEFAULT 0,
+                    model TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    candidates_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_usage_user_time ON token_usage (user_id, created_at)"
+            )
             await db.commit()
 
             self._db = db
@@ -279,6 +297,71 @@ class UserStorage:
             (target_chat_id, user_id),
         )
         await db.commit()
+
+    async def record_token_usage(
+        self,
+        user_id: int,
+        chat_id: int,
+        model: str,
+        prompt_tokens: int,
+        candidates_tokens: int,
+        total_tokens: int,
+    ) -> None:
+        """Записывает точный расход токенов из usage_metadata ответа Gemini."""
+        db = await self._ensure_db()
+        await db.execute(
+            """
+            INSERT INTO token_usage (user_id, chat_id, model, prompt_tokens, candidates_tokens, total_tokens)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, chat_id, model, prompt_tokens, candidates_tokens, total_tokens),
+        )
+        await db.commit()
+
+    async def get_token_stats(self, user_id: int) -> dict[str, int]:
+        """Возвращает агрегированную статистику токенов за сегодня и за всё время."""
+        db = await self._ensure_db()
+
+        # Статистика за сегодня
+        cursor = await db.execute(
+            """
+            SELECT 
+                COALESCE(SUM(prompt_tokens), 0) as today_prompt,
+                COALESCE(SUM(candidates_tokens), 0) as today_candidates,
+                COALESCE(SUM(total_tokens), 0) as today_total,
+                COUNT(*) as today_requests
+            FROM token_usage
+            WHERE user_id = ? AND date(created_at) = date('now')
+            """,
+            (user_id,),
+        )
+        today_row = await cursor.fetchone()
+
+        # Статистика за всё время
+        cursor = await db.execute(
+            """
+            SELECT 
+                COALESCE(SUM(prompt_tokens), 0) as all_prompt,
+                COALESCE(SUM(candidates_tokens), 0) as all_candidates,
+                COALESCE(SUM(total_tokens), 0) as all_total,
+                COUNT(*) as all_requests
+            FROM token_usage
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        all_row = await cursor.fetchone()
+
+        return {
+            "today_prompt": int(today_row["today_prompt"]) if today_row else 0,
+            "today_candidates": int(today_row["today_candidates"]) if today_row else 0,
+            "today_total": int(today_row["today_total"]) if today_row else 0,
+            "today_requests": int(today_row["today_requests"]) if today_row else 0,
+            "all_prompt": int(all_row["all_prompt"]) if all_row else 0,
+            "all_candidates": int(all_row["all_candidates"]) if all_row else 0,
+            "all_total": int(all_row["all_total"]) if all_row else 0,
+            "all_requests": int(all_row["all_requests"]) if all_row else 0,
+        }
 
 
 

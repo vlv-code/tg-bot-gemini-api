@@ -219,14 +219,27 @@ async def _send_response(
 
 async def _render_limits_menu_text(user_id: int) -> str:
     status = await limiter.status(user_id)
+    token_stats = await storage.get_token_stats(user_id)
     rem_min = max(0, status.limit_minute - status.used_minute)
     rem_day = max(0, status.limit_day - status.used_day)
+
+    today_tok = f"{token_stats['today_total']:,}".replace(",", " ")
+    today_prompt = f"{token_stats['today_prompt']:,}".replace(",", " ")
+    today_cand = f"{token_stats['today_candidates']:,}".replace(",", " ")
+    all_tok = f"{token_stats['all_total']:,}".replace(",", " ")
+
     return (
-        "📊 <b>Статус лимитов и квоты запросов:</b>\n\n"
-        f"• <b>Запросов за минуту:</b> <code>{status.used_minute}/{status.limit_minute}</code> (осталось: {rem_min})\n"
-        f"• <b>Запросов за сутки:</b> <code>{status.used_day}/{status.limit_day}</code> (осталось: {rem_day})\n\n"
-        "💡 <i>Лимиты работают по скользящему окну (60 сек для минутного и 24 ч для суточного). "
-        "В Google GenAI API нет эндпоинта для проверки остатка глобального баланса — при исчерпании Google возвращает ошибку 429 с таймером ожидания.</i>"
+        "📊 <b>Статус квот и расхода токенов:</b>\n\n"
+        "⏱ <b>Лимиты запросов (Rate Limits):</b>\n"
+        f"• <b>В минуту (RPM):</b> <code>{status.used_minute}/{status.limit_minute}</code> (осталось: {rem_min})\n"
+        f"• <b>В сутки (RPD):</b> <code>{status.used_day}/{status.limit_day}</code> (осталось: {rem_day})\n\n"
+        "📈 <b>Расход токенов (Usage Metadata):</b>\n"
+        f"• <b>Сегодня:</b> <code>{today_tok}</code> токенов\n"
+        f"  └ <i>Вход (промпт + контекст):</i> <code>{today_prompt}</code>\n"
+        f"  └ <i>Выход (ответ модели):</i> <code>{today_cand}</code>\n"
+        f"• <b>За всё время:</b> <code>{all_tok}</code> токенов ({token_stats['all_requests']} запросов)\n\n"
+        "💡 <i>Лимиты работают по скользящему окну (60 сек в минуту, 24 ч в сутки). "
+        "При исчерпании Google возвращает 429 с точным таймером ожидания.</i>"
     )
 
 
@@ -888,6 +901,15 @@ async def _process_user_turn(
             await storage.add_turn(user_id, "user", history_text, chat_id=chat_id)
             if response.text:
                 await storage.add_turn(user_id, "model", response.text, chat_id=chat_id)
+            if response.total_tokens > 0:
+                await storage.record_token_usage(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    model=state.model,
+                    prompt_tokens=response.prompt_tokens,
+                    candidates_tokens=response.candidates_tokens,
+                    total_tokens=response.total_tokens,
+                )
 
         await _send_response(
             message=message,
@@ -1238,6 +1260,15 @@ async def _execute_inline_generation(
             return
 
         await limiter.hit(user_id)
+        if response.total_tokens > 0:
+            await storage.record_token_usage(
+                user_id=user_id,
+                chat_id=user_id,
+                model=state.model,
+                prompt_tokens=response.prompt_tokens,
+                candidates_tokens=response.candidates_tokens,
+                total_tokens=response.total_tokens,
+            )
 
     # Оформляем цитату исходного запроса в начале сообщения без указания ника
     full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")

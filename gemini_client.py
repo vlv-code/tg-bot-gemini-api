@@ -30,6 +30,9 @@ class GeminiResponse:
     text: str
     audio_bytes: Optional[bytes] = None
     audio_mime_type: Optional[str] = None
+    prompt_tokens: int = 0
+    candidates_tokens: int = 0
+    total_tokens: int = 0
 
 
 class GeminiClient:
@@ -150,7 +153,22 @@ class GeminiClient:
                 "Gemini вернул пустой ответ (возможно, сработали safety-фильтры)."
             )
 
-        return GeminiResponse(text=text, audio_bytes=audio_bytes, audio_mime_type=audio_mime_type)
+        prompt_tokens = 0
+        candidates_tokens = 0
+        total_tokens = 0
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            prompt_tokens = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+            candidates_tokens = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            total_tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
+
+        return GeminiResponse(
+            text=text,
+            audio_bytes=audio_bytes,
+            audio_mime_type=audio_mime_type,
+            prompt_tokens=prompt_tokens,
+            candidates_tokens=candidates_tokens,
+            total_tokens=total_tokens,
+        )
 
     async def generate_speech(
         self, text: str, voice_name: Optional[str] = None, model: Optional[str] = None

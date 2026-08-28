@@ -224,12 +224,13 @@ async def _send_response(
         full_text = _format_with_prompt_quote(prompt_text, response.text)
         speak_kb = None
         if not want_audio:
+            author_id = message.from_user.id if message.from_user else 0
             speak_kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
                             text="🎙 Озвучить ответ",
-                            callback_data="speak_response",
+                            callback_data=f"speak_response:{author_id}",
                         )
                     ]
                 ]
@@ -598,9 +599,19 @@ async def cmd_text(message: Message) -> None:
     )
 
 
-@router.callback_query(F.data == "speak_response")
+@router.callback_query(F.data.startswith("speak_response"))
 async def cb_speak_response(callback: CallbackQuery) -> None:
     """Озвучивает текст сообщения по клику на кнопку под ответом."""
+    parts = callback.data.split(":", 1)
+    if len(parts) > 1:
+        try:
+            owner_id = int(parts[1])
+            if owner_id > 0 and callback.from_user.id != owner_id and callback.from_user.id not in settings.admin_ids:
+                await callback.answer("⛔️ Только автор запроса может нажать эту кнопку!", show_alert=True)
+                return
+        except ValueError:
+            pass
+
     msg = callback.message
     if not msg or not msg.text:
         await callback.answer("Текст сообщения недоступен", show_alert=True)
@@ -1717,7 +1728,7 @@ async def handle_inline(query: InlineQuery) -> None:
         return
 
     result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
-    _pending_inline_prompts[result_id] = raw_query
+    _pending_inline_prompts[result_id] = (query.from_user.id, raw_query)
 
     if len(_pending_inline_prompts) > 1000:
         for k in list(_pending_inline_prompts.keys())[:200]:
@@ -1922,7 +1933,14 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     if not chosen.inline_message_id:
         return
 
-    raw_query = chosen.query.strip() or _pending_inline_prompts.get(chosen.result_id, "")
+    entry = _pending_inline_prompts.get(chosen.result_id)
+    raw_query = ""
+    if isinstance(entry, tuple):
+        _, raw_query = entry
+    elif isinstance(entry, str):
+        raw_query = entry
+
+    raw_query = chosen.query.strip() or raw_query
     if not raw_query:
         return
 
@@ -1948,16 +1966,27 @@ async def cb_inline_gen(callback: CallbackQuery) -> None:
         return
 
     result_id = callback.data.split(":", 1)[1]
-    raw_query = _pending_inline_prompts.get(result_id, "")
-    if not raw_query:
+    entry = _pending_inline_prompts.get(result_id)
+    if not entry:
         await callback.answer("Генерирую...")
+        return
+
+    author_id = None
+    raw_query = ""
+    if isinstance(entry, tuple):
+        author_id, raw_query = entry
+    elif isinstance(entry, str):
+        raw_query = entry
+
+    if author_id and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
+        await callback.answer("⛔️ Только автор запроса может запустить генерацию!", show_alert=True)
         return
 
     await callback.answer("Генерация запущена...")
     _run_background_task(
         _execute_inline_generation(
             bot=callback.bot,
-            user_id=callback.from_user.id,
+            user_id=author_id or callback.from_user.id,
             raw_query=raw_query,
             inline_message_id=callback.inline_message_id,
         )
@@ -1972,9 +2001,20 @@ async def cb_inline_tts(callback: CallbackQuery) -> None:
         return
 
     result_id = callback.data.split(":", 1)[1]
-    raw_query = _pending_inline_prompts.get(result_id, "")
-    if not raw_query:
+    entry = _pending_inline_prompts.get(result_id)
+    if not entry:
         await callback.answer("Генерирую озвучку...")
+        return
+
+    author_id = None
+    raw_query = ""
+    if isinstance(entry, tuple):
+        author_id, raw_query = entry
+    elif isinstance(entry, str):
+        raw_query = entry
+
+    if author_id and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
+        await callback.answer("⛔️ Только автор запроса может запустить озвучку!", show_alert=True)
         return
 
     parts = raw_query.split(maxsplit=1)
@@ -1983,7 +2023,7 @@ async def cb_inline_tts(callback: CallbackQuery) -> None:
     _run_background_task(
         _execute_inline_tts_generation(
             bot=callback.bot,
-            user_id=callback.from_user.id,
+            user_id=author_id or callback.from_user.id,
             tts_text=tts_text,
             inline_message_id=callback.inline_message_id,
         )

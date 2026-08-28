@@ -3,8 +3,10 @@ import hashlib
 import html
 import io
 import logging
+import re
 from typing import Optional, Sequence, Union
 
+import aiohttp
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
@@ -42,6 +44,26 @@ from rate_limiter import RateLimiter
 from storage import UserState, UserStorage
 
 logger = logging.getLogger(__name__)
+
+URL_REGEX = re.compile(r'https?://[^\s<>"]+')
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')
+
+
+async def try_download_image_from_url(url: str) -> Optional[tuple[bytes, str]]:
+    """Пытается скачать изображение по ссылке (до 15 МБ)."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    if "image/" in content_type or url.lower().endswith(IMAGE_EXTENSIONS):
+                        mime = content_type.split(";")[0] if "image/" in content_type else "image/jpeg"
+                        data = await resp.read()
+                        if len(data) <= 15 * 1024 * 1024:
+                            return data, mime
+    except Exception:
+        pass
+    return None
 
 router = Router()
 router.message.outer_middleware(AccessMiddleware())
@@ -603,6 +625,25 @@ async def _process_user_turn(
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message) -> None:
+    text = message.text
+    url_match = URL_REGEX.search(text)
+    if url_match:
+        url = url_match.group(0)
+        img_data = await try_download_image_from_url(url)
+        if img_data:
+            img_bytes, mime = img_data
+            image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
+            clean_text = text.replace(url, "").strip() or "Опиши подробно, что изображено на этом фото."
+            content_input = [image_part, clean_text]
+            history_text = f"[Фото по ссылке] {clean_text}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                force_voice_reply=False,
+            )
+            return
+
     await _process_user_turn(
         message=message,
         content_input=message.text,
@@ -676,6 +717,7 @@ async def handle_document(message: Message) -> None:
         force_voice_reply=False,
     )
 
+
 # --- Inline mode (без сжигания квоты при наборе текста) ---
 
 INLINE_ANSWER_LIMIT = 3900
@@ -684,13 +726,124 @@ INLINE_ANSWER_LIMIT = 3900
 _pending_inline_prompts: dict[str, str] = {}
 
 
+async def _execute_inline_tts_generation(
+    bot: Bot,
+    user_id: int,
+    tts_text: str,
+    inline_message_id: str,
+) -> None:
+    """Генерирует озвучку текста и отправляет голосовое сообщение в ЛС пользователю."""
+    async with user_locks.get(user_id):
+        limit_status = await limiter.check(user_id)
+        if not limit_status.allowed:
+            wait_seconds = int(limit_status.retry_after) + 1
+            try:
+                await bot.edit_message_text(
+                    text=(
+                        f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
+                        f"⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
+                    ),
+                    inline_message_id=inline_message_id,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        state = await storage.get(user_id)
+
+        try:
+            audio_bytes = await gemini_client.generate_speech(
+                text=tts_text,
+                voice_name=state.tts_voice,
+                model=state.tts_model,
+            )
+        except GeminiError as exc:
+            try:
+                await bot.edit_message_text(
+                    text=(
+                        f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
+                        f"⚠️ <i>Ошибка генерации речи: {html.escape(str(exc))}</i>"
+                    ),
+                    inline_message_id=inline_message_id,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except TelegramBadRequest:
+                pass
+            return
+        except Exception:
+            logger.exception("Unexpected error in inline TTS generation")
+            try:
+                await bot.edit_message_text(
+                    text=(
+                        f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
+                        "⚠️ <i>Непредвиденная ошибка при генерации речи.</i>"
+                    ),
+                    inline_message_id=inline_message_id,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        await limiter.hit(user_id)
+
+    audio_data, audio_filename, _ = convert_gemini_audio(audio_bytes)
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username or ""
+
+    pm_status = "✅ <i>Голосовое сообщение сгенерировано и отправлено в личку с ботом!</i>"
+    try:
+        voice_file = BufferedInputFile(audio_data, filename=audio_filename)
+        await bot.send_voice(
+            chat_id=user_id,
+            voice=voice_file,
+            caption=f"🎙 Озвучка из инлайн-режима:\n{tts_text[:200]}",
+        )
+    except Exception:
+        pm_status = (
+            "✅ <i>Озвучка готова! Чтобы бот мог присылать аудиофайлы в личку, "
+            "откройте диалог с ботом по кнопке ниже.</i>"
+        )
+
+    keyboard = None
+    if bot_username:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🎧 Открыть голосовое в боте",
+                        url=f"https://t.me/{bot_username}",
+                    )
+                ]
+            ]
+        )
+
+    try:
+        await bot.edit_message_text(
+            text=(
+                f"🎙 <b>Озвучка текста (TTS):</b>\n"
+                f"<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
+                f"{pm_status}"
+            ),
+            inline_message_id=inline_message_id,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    except TelegramBadRequest:
+        pass
+
+
 async def _execute_inline_generation(
     bot: Bot,
     user_id: int,
     raw_query: str,
     inline_message_id: str,
 ) -> None:
-    """Генерирует ответ Gemini и редактирует отправленное инлайн-сообщение."""
+    """Генерирует ответ Gemini (текст или анализ картинки по ссылке) и редактирует инлайн-сообщение."""
     async with user_locks.get(user_id):
         limit_status = await limiter.check(user_id)
         if not limit_status.allowed:
@@ -711,12 +864,24 @@ async def _execute_inline_generation(
 
         state = await storage.get(user_id)
 
+        # Проверяем наличие ссылки на изображение
+        content_input: Union[str, Sequence[Union[str, types.Part]]] = raw_query
+        url_match = URL_REGEX.search(raw_query)
+        if url_match:
+            img_url = url_match.group(0)
+            img_data = await try_download_image_from_url(img_url)
+            if img_data:
+                img_bytes, mime = img_data
+                image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
+                clean_query = raw_query.replace(img_url, "").strip() or "Опиши подробно, что изображено на этой картинке."
+                content_input = [image_part, clean_query]
+
         try:
             # Inline-запросы выполняются как изолированные разовые обращения
             response = await gemini_client.ask(
                 model=state.model,
                 history_turns=[],
-                message=raw_query,
+                message=content_input,
                 system_prompt=state.system_prompt,
                 want_audio=False,
             )
@@ -790,13 +955,17 @@ async def _execute_inline_generation(
 async def handle_inline(query: InlineQuery) -> None:
     raw_query = query.query.strip()
     if not raw_query:
-        # Если запрос пустой, подсказываем формат использования
         help_article = InlineQueryResultArticle(
             id="inline_help",
             title="💬 Задайте вопрос Gemini...",
-            description="Наберите текст запроса: @bot_username ваш вопрос",
+            description="Наберите: @bot_username вопрос (или /tts текст, или ссылка на картинку)",
             input_message_content=InputTextMessageContent(
-                message_text="Чтобы задать вопрос Gemini в любом чате, наберите: <code>@bot_username ваш вопрос</code>",
+                message_text=(
+                    "Чтобы обратиться к Gemini в любом чате, наберите:\n"
+                    "• <code>@bot_username ваш вопрос</code>\n"
+                    "• <code>@bot_username /tts текст для озвучки</code>\n"
+                    "• <code>@bot_username https://ссылка_на_картинку вопрос</code>"
+                ),
                 parse_mode="HTML",
             ),
         )
@@ -807,24 +976,67 @@ async def handle_inline(query: InlineQuery) -> None:
         )
         return
 
-    # Не вызываем Gemini API при вводе текста, отдаём карточку мгновенно!
     result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
     _pending_inline_prompts[result_id] = raw_query
 
-    # Ограничиваем размер кэша
     if len(_pending_inline_prompts) > 1000:
         for k in list(_pending_inline_prompts.keys())[:200]:
             _pending_inline_prompts.pop(k, None)
 
+    # Режим 1: Озвучка текста (/tts или tts)
+    if raw_query.lower().startswith(("/tts", "tts")):
+        parts = raw_query.split(maxsplit=1)
+        tts_text = parts[1].strip() if len(parts) > 1 else ""
+        if not tts_text:
+            article = InlineQueryResultArticle(
+                id="tts_hint",
+                title="🎙 Озвучить текст (TTS)",
+                description="Наберите текст: @bot_username /tts Текст для озвучки",
+                input_message_content=InputTextMessageContent(
+                    message_text="Использование TTS: <code>@bot_username /tts Текст для озвучки</code>",
+                    parse_mode="HTML",
+                ),
+            )
+            await query.answer(results=[article], cache_time=0, is_personal=True)
+            return
+
+        prompt_short = tts_text[:70] + ("…" if len(tts_text) > 70 else "")
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🎙 Генерирую озвучку...",
+                        callback_data=f"inline_tts:{result_id}",
+                    )
+                ]
+            ]
+        )
+        article = InlineQueryResultArticle(
+            id=result_id,
+            title="🎙 Озвучить текст (TTS)",
+            description=f"«{prompt_short}» (нажмите для озвучки)",
+            reply_markup=keyboard,
+            input_message_content=InputTextMessageContent(
+                message_text=(
+                    f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
+                    "⏳ <i>Синтезирую голосовое сообщение...</i>"
+                ),
+                parse_mode="HTML",
+            ),
+        )
+        await query.answer(results=[article], cache_time=0, is_personal=True)
+        return
+
+    # Режим 2: Картинка по ссылке
+    is_image = bool(URL_REGEX.search(raw_query))
+    title = "🖼 Анализ картинки по ссылке" if is_image else "💬 Отправить запрос к Gemini"
     prompt_short = raw_query[:80] + ("…" if len(raw_query) > 80 else "")
 
-    # ВАЖНО: Telegram присваивает inline_message_id и позволяет редактировать сообщение
-    # ТОЛЬКО ЕСЛИ к сообщению прикреплена инлайн-клавиатура (reply_markup)!
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="⏳ Генерирую ответ...",
+                    text="⏳ Анализирую..." if is_image else "⏳ Генерирую ответ...",
                     callback_data=f"inline_gen:{result_id}",
                 )
             ]
@@ -833,8 +1045,8 @@ async def handle_inline(query: InlineQuery) -> None:
 
     article = InlineQueryResultArticle(
         id=result_id,
-        title="💬 Отправить запрос к Gemini",
-        description=f"«{prompt_short}» (нажмите, чтобы сгенерировать ответ)",
+        title=title,
+        description=f"«{prompt_short}» (нажмите для отправки)",
         reply_markup=keyboard,
         input_message_content=InputTextMessageContent(
             message_text=(
@@ -862,6 +1074,20 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     if not raw_query:
         return
 
+    if raw_query.lower().startswith(("/tts", "tts")):
+        parts = raw_query.split(maxsplit=1)
+        tts_text = parts[1].strip() if len(parts) > 1 else ""
+        if tts_text:
+            asyncio.create_task(
+                _execute_inline_tts_generation(
+                    bot=chosen.bot,
+                    user_id=chosen.from_user.id,
+                    tts_text=tts_text,
+                    inline_message_id=chosen.inline_message_id,
+                )
+            )
+            return
+
     asyncio.create_task(
         _execute_inline_generation(
             bot=chosen.bot,
@@ -874,7 +1100,7 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
 
 @router.callback_query(F.data.startswith("inline_gen:"))
 async def cb_inline_gen(callback: CallbackQuery) -> None:
-    """Fallback-хендлер на случай, если chosen_inline_result задерживается или отключен в BotFather."""
+    """Fallback-хендлер для текстовых/визуальных запросов."""
     if not callback.inline_message_id:
         await callback.answer("Ошибка: сообщение устарело", show_alert=True)
         return
@@ -894,5 +1120,32 @@ async def cb_inline_gen(callback: CallbackQuery) -> None:
             inline_message_id=callback.inline_message_id,
         )
     )
+
+
+@router.callback_query(F.data.startswith("inline_tts:"))
+async def cb_inline_tts(callback: CallbackQuery) -> None:
+    """Fallback-хендлер для голосовой озвучки (TTS)."""
+    if not callback.inline_message_id:
+        await callback.answer("Ошибка: сообщение устарело", show_alert=True)
+        return
+
+    result_id = callback.data.split(":", 1)[1]
+    raw_query = _pending_inline_prompts.get(result_id, "")
+    if not raw_query:
+        await callback.answer("Генерирую озвучку...")
+        return
+
+    parts = raw_query.split(maxsplit=1)
+    tts_text = parts[1].strip() if len(parts) > 1 else raw_query
+    await callback.answer("Синтез речи запущен...")
+    asyncio.create_task(
+        _execute_inline_tts_generation(
+            bot=callback.bot,
+            user_id=callback.from_user.id,
+            tts_text=tts_text,
+            inline_message_id=callback.inline_message_id,
+        )
+    )
+
 
 

@@ -167,7 +167,7 @@ async def _send_response(
 @router.message(CommandStart())
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
-    state = await storage.get(message.from_user.id)
+    state = await storage.get(message.from_user.id, chat_id=message.chat.id)
     await message.answer(
         _render_main_menu_text(state),
         parse_mode="HTML",
@@ -177,7 +177,7 @@ async def cmd_menu(message: Message) -> None:
 
 @router.message(Command("model"))
 async def cmd_model(message: Message) -> None:
-    state = await storage.get(message.from_user.id)
+    state = await storage.get(message.from_user.id, chat_id=message.chat.id)
     await message.answer(
         f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
         parse_mode="HTML",
@@ -187,7 +187,7 @@ async def cmd_model(message: Message) -> None:
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
-    state = await storage.get(message.from_user.id)
+    state = await storage.get(message.from_user.id, chat_id=message.chat.id)
     await message.answer(
         "⚙️ <b>Параметры чата и ответов:</b>",
         parse_mode="HTML",
@@ -198,7 +198,7 @@ async def cmd_settings(message: Message) -> None:
 @router.message(Command("prompt"))
 async def cmd_prompt(message: Message) -> None:
     user_id = message.from_user.id
-    state = await storage.get(user_id)
+    state = await storage.get(user_id, chat_id=message.chat.id)
     args = message.text.split(maxsplit=1)
 
     if len(args) == 1:
@@ -242,7 +242,7 @@ async def cmd_tts(message: Message) -> None:
             )
             return
 
-        state = await storage.get(user_id)
+        state = await storage.get(user_id, chat_id=message.chat.id)
 
         async with ChatActionSender.record_voice(bot=message.bot, chat_id=message.chat.id):
             try:
@@ -280,7 +280,8 @@ async def cmd_limits(message: Message) -> None:
 
 @router.callback_query(F.data == "menu:main")
 async def cb_menu_main(callback: CallbackQuery) -> None:
-    state = await storage.get(callback.from_user.id)
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     try:
         await callback.message.edit_text(
             _render_main_menu_text(state),
@@ -294,7 +295,8 @@ async def cb_menu_main(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:model")
 async def cb_menu_model(callback: CallbackQuery) -> None:
-    state = await storage.get(callback.from_user.id)
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     try:
         await callback.message.edit_text(
             f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
@@ -314,8 +316,9 @@ async def cb_set_model(callback: CallbackQuery) -> None:
         return
 
     user_id = callback.from_user.id
+    chat_id = callback.message.chat.id if callback.message else user_id
     await storage.set_model(user_id, model)
-    await storage.clear_history(user_id)
+    await storage.clear_history(user_id, chat_id=chat_id)
 
     try:
         await callback.message.edit_text(
@@ -325,7 +328,8 @@ async def cb_set_model(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer(f"Модель переключена на {model} (контекст очищен)")
+    await callback.answer(f"Модель переключена на {model} (контекст чата очищен)")
+
 
 
 @router.callback_query(F.data == "menu:tts")
@@ -421,7 +425,8 @@ async def cb_toggle_voice_tts(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:settings")
 async def cb_menu_settings(callback: CallbackQuery) -> None:
-    state = await storage.get(callback.from_user.id)
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     try:
         await callback.message.edit_text(
             "⚙️ <b>Параметры чата и ответов:</b>",
@@ -435,8 +440,9 @@ async def cb_menu_settings(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "toggle_rich")
 async def cb_toggle_rich(callback: CallbackQuery) -> None:
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     rich = await storage.toggle_rich(callback.from_user.id)
-    state = await storage.get(callback.from_user.id)
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     try:
         await callback.message.edit_text(
             "⚙️ <b>Параметры чата и ответов:</b>",
@@ -450,8 +456,9 @@ async def cb_toggle_rich(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "toggle_voice")
 async def cb_toggle_voice(callback: CallbackQuery) -> None:
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     voice = await storage.toggle_voice(callback.from_user.id)
-    state = await storage.get(callback.from_user.id)
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     try:
         await callback.message.edit_text(
             "⚙️ <b>Параметры чата и ответов:</b>",
@@ -465,8 +472,9 @@ async def cb_toggle_voice(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "clear_history" | F.data == "menu:clear_hist")
 async def cb_clear_history(callback: CallbackQuery) -> None:
-    await storage.clear_history(callback.from_user.id)
-    state = await storage.get(callback.from_user.id)
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    await storage.clear_history(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     # Если нажали из главного меню, обновим счетчик в главном меню
     if callback.data == "menu:clear_hist":
         try:
@@ -477,12 +485,13 @@ async def cb_clear_history(callback: CallbackQuery) -> None:
             )
         except TelegramBadRequest:
             pass
-    await callback.answer("История диалога очищена ✅")
+    await callback.answer("История этого чата очищена ✅")
 
 
 @router.callback_query(F.data == "menu:prompt")
 async def cb_menu_prompt(callback: CallbackQuery) -> None:
-    state = await storage.get(callback.from_user.id)
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     try:
         await callback.message.edit_text(
             _render_prompt_menu_text(state),
@@ -496,8 +505,9 @@ async def cb_menu_prompt(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "reset_prompt")
 async def cb_reset_prompt(callback: CallbackQuery) -> None:
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     await storage.set_system_prompt(callback.from_user.id, "")
-    state = await storage.get(callback.from_user.id)
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
     try:
         await callback.message.edit_text(
             _render_prompt_menu_text(state),
@@ -533,6 +543,7 @@ async def _process_user_turn(
     force_voice_reply: bool = False,
 ) -> None:
     user_id = message.from_user.id
+    chat_id = message.chat.id
 
     async with user_locks.get(user_id):
         limit_status = await limiter.check(user_id)
@@ -544,7 +555,7 @@ async def _process_user_turn(
             )
             return
 
-        state = await storage.get(user_id)
+        state = await storage.get(user_id, chat_id=chat_id)
         action = (
             ChatActionSender.record_voice
             if (state.voice_mode or force_voice_reply)
@@ -570,9 +581,9 @@ async def _process_user_turn(
                 return
 
             await limiter.hit(user_id)
-            await storage.add_turn(user_id, "user", history_text)
+            await storage.add_turn(user_id, "user", history_text, chat_id=chat_id)
             if response.text:
-                await storage.add_turn(user_id, "model", response.text)
+                await storage.add_turn(user_id, "model", response.text, chat_id=chat_id)
 
         await _send_response(
             message=message,
@@ -641,8 +652,8 @@ async def handle_voice(message: Message) -> None:
 @router.message(F.document)
 async def handle_document(message: Message) -> None:
     doc = message.document
-    mime_type = doc.mime_type or "application/pdf"
-    prompt_text = message.caption or f"Проанализируй документ '{doc.file_name or 'файл'}'."
+    mime_type = doc.mime_type or "application/octet-stream"
+    prompt_text = message.caption or f"Проанализируй документ {doc.file_name or ''}."
 
     file_io = io.BytesIO()
     await message.bot.download(doc.file_id, destination=file_io)
@@ -650,7 +661,7 @@ async def handle_document(message: Message) -> None:
 
     doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=mime_type)
     content_input = [doc_part, prompt_text]
-    history_text = f"[Документ {doc.file_name or ''}] {prompt_text}"
+    history_text = f"[Документ: {doc.file_name or 'файл'}] {prompt_text}"
 
     await _process_user_turn(
         message=message,
@@ -743,9 +754,10 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
         state = await storage.get(user_id)
 
         try:
+            # Inline-запросы выполняются как изолированные разовые обращения (без контекста лички)
             response = await gemini_client.ask(
                 model=state.model,
-                history_turns=state.history,
+                history_turns=[],
                 message=raw_query,
                 system_prompt=state.system_prompt,
                 want_audio=False,
@@ -779,9 +791,6 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
             return
 
         await limiter.hit(user_id)
-        await storage.add_turn(user_id, "user", raw_query)
-        if response.text:
-            await storage.add_turn(user_id, "model", response.text)
 
     # Оформляем цитату исходного запроса в начале сообщения без указания ника
     full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")

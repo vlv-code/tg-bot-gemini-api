@@ -95,10 +95,18 @@ class UserStorage:
                     f"ALTER TABLE users ADD COLUMN tts_voice TEXT NOT NULL DEFAULT '{self._default_tts_voice}'"
                 )
 
+            # Миграция: добавляем chat_id в history, если его ещё нет
+            cursor = await db.execute("PRAGMA table_info(history)")
+            hist_columns = [row["name"] for row in await cursor.fetchall()]
+            if hist_columns and "chat_id" not in hist_columns:
+                await db.execute("ALTER TABLE history ADD COLUMN chat_id INTEGER NOT NULL DEFAULT 0")
+                await db.execute("UPDATE history SET chat_id = user_id WHERE chat_id = 0")
+
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL DEFAULT 0,
                     user_id INTEGER NOT NULL,
                     role TEXT NOT NULL,
                     text TEXT NOT NULL,
@@ -107,7 +115,7 @@ class UserStorage:
                 """
             )
             await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_history_user_id ON history (user_id, id)"
+                "CREATE INDEX IF NOT EXISTS idx_history_chat_user ON history (chat_id, user_id, id)"
             )
             await db.commit()
 
@@ -135,10 +143,12 @@ class UserStorage:
             (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
         )
 
-    async def get(self, user_id: int) -> UserState:
-        """Получает состояние пользователя и последние сообщения истории."""
+    async def get(self, user_id: int, chat_id: Optional[int] = None) -> UserState:
+        """Получает состояние пользователя и последние сообщения истории конкретного чата."""
         db = await self._ensure_db()
         await self._ensure_user(db, user_id)
+
+        target_chat_id = chat_id if chat_id is not None else user_id
 
         cursor = await db.execute(
             "SELECT model, rich_mode, voice_mode, system_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
@@ -157,12 +167,12 @@ class UserStorage:
             """
             SELECT role, text FROM (
                 SELECT id, role, text FROM history
-                WHERE user_id = ?
+                WHERE chat_id = ? AND user_id = ?
                 ORDER BY id DESC
                 LIMIT ?
             ) ORDER BY id ASC
             """,
-            (user_id, self._max_history),
+            (target_chat_id, user_id, self._max_history),
         )
         rows = await cursor.fetchall()
         history = [Turn(role=r["role"], text=r["text"]) for r in rows]
@@ -237,33 +247,38 @@ class UserStorage:
         )
         await db.commit()
 
-    async def add_turn(self, user_id: int, role: str, text: str) -> None:
+    async def add_turn(
+        self, user_id: int, role: str, text: str, chat_id: Optional[int] = None
+    ) -> None:
+        target_chat_id = chat_id if chat_id is not None else user_id
         db = await self._ensure_db()
         await self._ensure_user(db, user_id)
         await db.execute(
-            "INSERT INTO history (user_id, role, text) VALUES (?, ?, ?)",
-            (user_id, role, text),
+            "INSERT INTO history (chat_id, user_id, role, text) VALUES (?, ?, ?, ?)",
+            (target_chat_id, user_id, role, text),
         )
         await db.execute(
             """
             DELETE FROM history
-            WHERE user_id = ? AND id NOT IN (
+            WHERE chat_id = ? AND user_id = ? AND id NOT IN (
                 SELECT id FROM history
-                WHERE user_id = ?
+                WHERE chat_id = ? AND user_id = ?
                 ORDER BY id DESC
                 LIMIT ?
             )
             """,
-            (user_id, user_id, self._max_history),
+            (target_chat_id, user_id, target_chat_id, user_id, self._max_history),
         )
         await db.commit()
 
-    async def clear_history(self, user_id: int) -> None:
+    async def clear_history(self, user_id: int, chat_id: Optional[int] = None) -> None:
+        target_chat_id = chat_id if chat_id is not None else user_id
         db = await self._ensure_db()
         await db.execute(
-            "DELETE FROM history WHERE user_id = ?",
-            (user_id,),
+            "DELETE FROM history WHERE chat_id = ? AND user_id = ?",
+            (target_chat_id, user_id),
         )
         await db.commit()
+
 
 

@@ -1418,7 +1418,8 @@ async def _process_user_turn(
                 except Exception:
                     pass
 
-            state = await storage.get(user_id, chat_id=chat_id)
+            history_mode = "quick" if use_quick_prompt else "main"
+            state = await storage.get(user_id, chat_id=chat_id, mode=history_mode)
             want_audio = False if force_text_only else (state.voice_mode or force_voice_reply)
             action = (
                 ChatActionSender.record_voice
@@ -1432,15 +1433,11 @@ async def _process_user_turn(
                 else state.system_prompt
             )
 
-            # Для режима /q (аватар/суфлёр) история предыдущего диалога с ботом отключается,
-            # чтобы старые реплики ассистента не сбивали модель и она отвечала строго от первого лица.
-            history_to_send = [] if use_quick_prompt else state.history
-
             async with action(bot=message.bot, chat_id=message.chat.id):
                 try:
                     response = await gemini_client.ask(
                         model=state.model,
-                        history_turns=history_to_send,
+                        history_turns=state.history,
                         message=content_input,
                         system_prompt=effective_prompt,
                         want_audio=want_audio,
@@ -1455,9 +1452,9 @@ async def _process_user_turn(
                     return
 
                 await limiter.hit(user_id)
-                await storage.add_turn(user_id, "user", history_text, chat_id=chat_id)
+                await storage.add_turn(user_id, "user", history_text, chat_id=chat_id, mode=history_mode)
                 if response.text:
-                    await storage.add_turn(user_id, "model", response.text, chat_id=chat_id)
+                    await storage.add_turn(user_id, "model", response.text, chat_id=chat_id, mode=history_mode)
                 if response.total_tokens > 0:
                     await storage.record_token_usage(
                         user_id=user_id,

@@ -104,12 +104,14 @@ class UserStorage:
                     "ALTER TABLE users ADD COLUMN quick_prompt TEXT NOT NULL DEFAULT ''"
                 )
 
-            # Миграция: добавляем chat_id в history, если его ещё нет
+            # Миграция: добавляем chat_id и mode в history, если их ещё нет
             cursor = await db.execute("PRAGMA table_info(history)")
             hist_columns = [row["name"] for row in await cursor.fetchall()]
             if hist_columns and "chat_id" not in hist_columns:
                 await db.execute("ALTER TABLE history ADD COLUMN chat_id INTEGER NOT NULL DEFAULT 0")
                 await db.execute("UPDATE history SET chat_id = user_id WHERE chat_id = 0")
+            if hist_columns and "mode" not in hist_columns:
+                await db.execute("ALTER TABLE history ADD COLUMN mode TEXT NOT NULL DEFAULT 'main'")
 
             await db.execute(
                 """
@@ -117,6 +119,7 @@ class UserStorage:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id INTEGER NOT NULL DEFAULT 0,
                     user_id INTEGER NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'main',
                     role TEXT NOT NULL,
                     text TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -124,7 +127,7 @@ class UserStorage:
                 """
             )
             await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_history_chat_user ON history (chat_id, user_id, id)"
+                "CREATE INDEX IF NOT EXISTS idx_history_chat_user ON history (chat_id, user_id, mode, id)"
             )
 
             await db.execute(
@@ -221,8 +224,10 @@ class UserStorage:
             (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
         )
 
-    async def get(self, user_id: int, chat_id: Optional[int] = None) -> UserState:
-        """Получает состояние пользователя и последние сообщения истории конкретного чата."""
+    async def get(
+        self, user_id: int, chat_id: Optional[int] = None, mode: str = "main"
+    ) -> UserState:
+        """Получает состояние пользователя и последние сообщения истории конкретного чата и режима."""
         db = await self._ensure_db()
         await self._ensure_user(db, user_id)
 
@@ -246,12 +251,12 @@ class UserStorage:
             """
             SELECT role, text FROM (
                 SELECT id, role, text FROM history
-                WHERE chat_id = ? AND user_id = ?
+                WHERE chat_id = ? AND user_id = ? AND mode = ?
                 ORDER BY id DESC
                 LIMIT ?
             ) ORDER BY id ASC
             """,
-            (target_chat_id, user_id, self._max_history),
+            (target_chat_id, user_id, mode, self._max_history),
         )
         rows = await cursor.fetchall()
         history = [Turn(role=r["role"], text=r["text"]) for r in rows]
@@ -359,26 +364,31 @@ class UserStorage:
         await db.commit()
 
     async def add_turn(
-        self, user_id: int, role: str, text: str, chat_id: Optional[int] = None
+        self,
+        user_id: int,
+        role: str,
+        text: str,
+        chat_id: Optional[int] = None,
+        mode: str = "main",
     ) -> None:
         target_chat_id = chat_id if chat_id is not None else user_id
         db = await self._ensure_db()
         await self._ensure_user(db, user_id)
         await db.execute(
-            "INSERT INTO history (chat_id, user_id, role, text) VALUES (?, ?, ?, ?)",
-            (target_chat_id, user_id, role, text),
+            "INSERT INTO history (chat_id, user_id, mode, role, text) VALUES (?, ?, ?, ?, ?)",
+            (target_chat_id, user_id, mode, role, text),
         )
         await db.execute(
             """
             DELETE FROM history
-            WHERE chat_id = ? AND user_id = ? AND id NOT IN (
+            WHERE chat_id = ? AND user_id = ? AND mode = ? AND id NOT IN (
                 SELECT id FROM history
-                WHERE chat_id = ? AND user_id = ?
+                WHERE chat_id = ? AND user_id = ? AND mode = ?
                 ORDER BY id DESC
                 LIMIT ?
             )
             """,
-            (target_chat_id, user_id, target_chat_id, user_id, self._max_history),
+            (target_chat_id, user_id, mode, target_chat_id, user_id, mode, self._max_history),
         )
         await db.commit()
 

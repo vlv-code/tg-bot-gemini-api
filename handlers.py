@@ -211,11 +211,11 @@ def _render_qprompt_menu_text(state: UserState) -> str:
     status = " (индивидуальный)" if is_custom else " (глобальный дефолт)"
 
     return (
-        f"🎭 <b>Системный промпт (Режим Аватара /q)</b>{status}:\n\n"
+        f"🎭 <b>Системный промпт (Режим Аватара)</b>{status}:\n\n"
         f"<code>{html.escape(effective)}</code>\n\n"
         "• Чтобы выбрать или изменить личность: нажмите <b>«🎭 Личности Аватара»</b>\n"
         "• Чтобы создать/изменить личность: <code>/avatar edit Имя = Текст</code>\n"
-        "• Чтобы сбросить к дефолту: <code>/qprompt reset</code>"
+        "• Чтобы сбросить к дефолту: <code>/avatar reset</code>"
     )
 
 
@@ -228,7 +228,7 @@ def _render_personas_menu_text(state: UserState, personas: list[dict]) -> str:
             break
 
     return (
-        f"🎭 <b>Личности Аватара (Ghostwriter / Режим /q)</b>:\n\n"
+        f"🎭 <b>Личности Аватара (Ghostwriter / Режим Аватара)</b>:\n\n"
         f"Активная личность: <b>{html.escape(active_name)}</b>\n\n"
         f"Текущий системный промпт:\n<code>{html.escape(current_prompt[:250])}{'…' if len(current_prompt) > 250 else ''}</code>\n\n"
         "<b>Управление личностями:</b>\n"

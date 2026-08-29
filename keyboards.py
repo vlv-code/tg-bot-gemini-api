@@ -7,7 +7,7 @@ def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню бота со всеми разделами."""
     buttons = [
         [InlineKeyboardButton(text="🤖 Модель Gemini", callback_data="menu:model")],
-        [InlineKeyboardButton(text="🎭 Личности Аватара (/q)", callback_data="menu:personas")],
+        [InlineKeyboardButton(text="🎭 Личности Аватара", callback_data="menu:personas")],
         [InlineKeyboardButton(text="🥊 Промпты Stand-режима", callback_data="menu:prompts")],
         [InlineKeyboardButton(text="🎙 Настройки озвучки (TTS)", callback_data="menu:tts")],
         [InlineKeyboardButton(text="⚙️ Параметры чата и история", callback_data="menu:settings")],
@@ -125,7 +125,7 @@ def prompt_keyboard() -> InlineKeyboardMarkup:
     """Меню системного промпта Stand-режима."""
     buttons = [
         [InlineKeyboardButton(text="📚 Каталог промптов Stand", callback_data="menu:prompts")],
-        [InlineKeyboardButton(text="🎭 Личности Аватара (/q)", callback_data="menu:personas")],
+        [InlineKeyboardButton(text="🎭 Личности Аватара", callback_data="menu:personas")],
         [InlineKeyboardButton(text="🔄 Сбросить промпт на дефолтный", callback_data="reset_prompt")],
         [InlineKeyboardButton(text="◀️ Назад в главное меню", callback_data="menu:main")],
     ]
@@ -133,10 +133,10 @@ def prompt_keyboard() -> InlineKeyboardMarkup:
 
 
 def qprompt_keyboard() -> InlineKeyboardMarkup:
-    """Меню системного промпта Режима Аватара (/q)."""
+    """Меню системного промпта Режима Аватара."""
     buttons = [
         [InlineKeyboardButton(text="🎭 Выбрать Личность Аватара", callback_data="menu:personas")],
-        [InlineKeyboardButton(text="🔄 Сбросить /q промпт на дефолтный", callback_data="reset_qprompt")],
+        [InlineKeyboardButton(text="🔄 Сбросить промпт на дефолтный", callback_data="reset_qprompt")],
         [InlineKeyboardButton(text="🥊 Промпт Stand-режима", callback_data="menu:prompt")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu:main")],
     ]

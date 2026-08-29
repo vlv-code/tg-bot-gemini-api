@@ -2738,10 +2738,6 @@ async def handle_inline(query: InlineQuery) -> None:
             results=[help_article],
             cache_time=0,
             is_personal=True,
-            button=InlineQueryResultsButton(
-                text="🎭 Каталог Личностей Аватара",
-                start_parameter="avatars",
-            ),
         )
         return
 
@@ -3045,10 +3041,6 @@ async def handle_inline(query: InlineQuery) -> None:
         results=results,
         cache_time=0,
         is_personal=True,
-        button=InlineQueryResultsButton(
-            text="🎭 Личности Аватара",
-            start_parameter="avatars",
-        ),
     )
 
 

@@ -232,9 +232,21 @@ async def _send_response(
     want_audio: bool = False,
 ) -> None:
     """Отправляет ответ пользователю (голосовое сообщение и/или текст с цитатой запроса)."""
-    if want_audio and response.audio_bytes:
+    audio_bytes = response.audio_bytes
+    # Если запрошен аудио-ответ, но модель вернула только текст, синтезируем речь через TTS
+    if want_audio and not audio_bytes and response.text:
         try:
-            audio_data, audio_filename, _ = await convert_gemini_audio(response.audio_bytes)
+            audio_bytes = await gemini_client.generate_speech(
+                text=response.text,
+                voice_name=state.tts_voice,
+                model=state.tts_model,
+            )
+        except Exception as exc:
+            logger.warning("Не удалось синтезировать TTS для голосового ответа: %s", exc)
+
+    if want_audio and audio_bytes:
+        try:
+            audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
             voice_file = BufferedInputFile(audio_data, filename=audio_filename)
             await message.answer_voice(voice_file)
         except Exception:

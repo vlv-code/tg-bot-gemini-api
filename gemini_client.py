@@ -94,7 +94,8 @@ class GeminiClient:
             ),
         ]
 
-        if want_audio:
+        is_audio_model = "tts" in model.lower() or "audio" in model.lower()
+        if want_audio and is_audio_model:
             config_kwargs["response_modalities"] = ["AUDIO", "TEXT"]
             config_kwargs["speech_config"] = types.SpeechConfig(
                 voice_config=types.VoiceConfig(

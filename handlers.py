@@ -2529,7 +2529,7 @@ async def _execute_inline_generation(
     else:
         raw_query = raw_query_override or ""
         is_quick = not session_id.startswith("stand_")
-        interactive = session_id.startswith(("prev_", "p_"))
+        interactive = session_id.startswith("prev_")
         persona_prompt = ""
         persona_name = "Аватар" if is_quick else "Stand"
 
@@ -3015,13 +3015,13 @@ async def handle_inline(query: InlineQuery) -> None:
             persona_name=p_title,
             persona_prompt=p["prompt"],
             is_quick=True,
-            interactive=True,
+            interactive=False,
         )
         pinned_articles.append(
             InlineQueryResultArticle(
                 id=p_sid,
-                title=f"⭐ Avatar: {p_title}",
-                description=f"«{prompt_short}» • Стиль: {p_title}",
+                title=f"⚡️ {p_title}",
+                description=f"«{prompt_short}» • Отправить сразу от 1-го лица",
                 input_message_content=InputTextMessageContent(
                     message_text=f"⏳ <i>Генерирую сообщение в стиле «{p_title}»...</i>",
                     parse_mode="HTML",

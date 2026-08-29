@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import html
 import io
@@ -39,6 +40,7 @@ from keyboards import (
     main_menu_keyboard,
     models_keyboard,
     prompt_keyboard,
+    qprompt_keyboard,
     settings_keyboard,
     tts_menu_keyboard,
     tts_models_keyboard,

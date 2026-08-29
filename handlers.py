@@ -39,9 +39,13 @@ from keyboards import (
     limits_keyboard,
     main_menu_keyboard,
     models_keyboard,
+    persona_view_keyboard,
+    personas_menu_keyboard,
     prompt_keyboard,
     qprompt_keyboard,
     settings_keyboard,
+    stand_prompt_view_keyboard,
+    stand_prompts_menu_keyboard,
     tts_menu_keyboard,
     tts_models_keyboard,
     tts_voices_keyboard,
@@ -188,9 +192,10 @@ def _render_prompt_menu_text(state: UserState) -> str:
     return (
         f"🥊 <b>Системный промпт (Stand-режим)</b>{status}:\n\n"
         f"<code>{html.escape(effective)}</code>\n\n"
-        "• Чтобы задать новый промпт: отправьте команду <code>/prompt текст промпта</code>\n"
-        "• Чтобы сбросить к дефолту: нажмите кнопку ниже или <code>/prompt reset</code>\n\n"
-        "💡 <i>Stand-режим — ваш персональный ИИ-стенд (диалог с памятью, анализ медиа, голос/текст).</i>"
+        "• Чтобы выбрать готовый пресет или сохранить свой: нажмите <b>«📚 Каталог промптов Stand»</b>\n"
+        "• Чтобы задать произвольный текст: <code>/prompt текст промпта</code>\n"
+        "• Чтобы сохранить именованный: <code>/prompt add Имя = Текст</code>\n"
+        "• Чтобы сбросить к дефолту: <code>/prompt reset</code>"
     )
 
 
@@ -206,9 +211,50 @@ def _render_qprompt_menu_text(state: UserState) -> str:
     return (
         f"🎭 <b>Системный промпт (Режим Аватара /q)</b>{status}:\n\n"
         f"<code>{html.escape(effective)}</code>\n\n"
-        "• Чтобы задать новый промпт: <code>/qprompt текст промпта</code>\n"
-        "• Чтобы сбросить к дефолту: нажмите кнопку ниже или <code>/qprompt reset</code>\n\n"
-        "💡 <i>В Режиме Аватара бот пишет готовый ответ собеседнику от 1-го лица с изолированной памятью.</i>"
+        "• Чтобы выбрать личность (Бро, Бизнес, Сарказм...): нажмите <b>«🎭 Личности Аватара»</b>\n"
+        "• Чтобы сохранить новую личность: <code>/persona add Имя = Текст</code>\n"
+        "• Чтобы сбросить к дефолту: <code>/qprompt reset</code>"
+    )
+
+
+def _render_personas_menu_text(state: UserState, personas: list[dict]) -> str:
+    current_prompt = state.quick_prompt or settings.quick_prompt
+    active_name = "Дефолтный суфлёр"
+    for p in personas:
+        if p["prompt"].strip() == current_prompt.strip():
+            active_name = p.get("title") or p["name"]
+            break
+
+    return (
+        f"🎭 <b>Личности Аватара (Ghostwriter / Режим /q)</b>:\n\n"
+        f"Активная личность: <b>{html.escape(active_name)}</b>\n\n"
+        f"Текущий системный промпт:\n<code>{html.escape(current_prompt[:250])}{'…' if len(current_prompt) > 250 else ''}</code>\n\n"
+        "<b>Управление личностями:</b>\n"
+        "• <i>Выбор:</i> Нажмите на нужную личность в списке ниже\n"
+        "• <i>Создать свою:</i> <code>/persona add Имя = Текст</code>\n"
+        "• <i>Переключить по имени:</i> <code>/persona Имя</code>\n"
+        "• <i>Удалить свою:</i> <code>/persona del Имя</code>"
+    )
+
+
+def _render_stand_prompts_menu_text(state: UserState, presets: list[dict]) -> str:
+    current_prompt = state.system_prompt or settings.system_prompt or "(по умолчанию)"
+    active_name = "Дефолтный Stand"
+    for p in presets:
+        if p["prompt"].strip() == current_prompt.strip():
+            active_name = p.get("title") or p["name"]
+            break
+
+    return (
+        f"🥊 <b>Промпты и Роли Stand-режима</b>:\n\n"
+        f"Активная роль: <b>{html.escape(active_name)}</b>\n\n"
+        f"Текущий системный промпт:\n<code>{html.escape(current_prompt[:250])}{'…' if len(current_prompt) > 250 else ''}</code>\n\n"
+        "<b>Управление промптами:</b>\n"
+        "• <i>Выбор:</i> Нажмите на пресет в списке ниже\n"
+        "• <i>Создать свой:</i> <code>/prompt add Имя = Текст</code>\n"
+        "• <i>Активировать по имени:</i> <code>/prompt Имя</code>\n"
+        "• <i>Задать произвольный:</i> <code>/prompt текст</code>\n"
+        "• <i>Удалить свой:</i> <code>/prompt del Имя</code>"
     )
 
 
@@ -368,6 +414,20 @@ async def cmd_settings(message: Message) -> None:
     )
 
 
+@router.message(Command("prompts"))
+async def cmd_prompts(message: Message) -> None:
+    """Каталог пресетов и сохранённых промптов Stand-режима."""
+    user_id = message.from_user.id
+    state = await storage.get(user_id, chat_id=message.chat.id)
+    presets = await storage.get_all_stand_presets(user_id)
+    current_prompt = state.system_prompt or settings.system_prompt or ""
+    await message.answer(
+        _render_stand_prompts_menu_text(state, presets),
+        parse_mode="HTML",
+        reply_markup=stand_prompts_menu_keyboard(presets, current_prompt),
+    )
+
+
 @router.message(Command("prompt"))
 async def cmd_prompt(message: Message) -> None:
     user_id = message.from_user.id
@@ -382,13 +442,102 @@ async def cmd_prompt(message: Message) -> None:
         )
         return
 
-    new_prompt = args[1].strip()
-    if new_prompt.lower() == "reset":
+    raw_arg = args[1].strip()
+    if raw_arg.lower() in ("reset", "clear", "default", "сброс", "дефолт"):
         await storage.set_system_prompt(user_id, "")
-        await message.answer("Системный промпт сброшен к значению по умолчанию ✅")
-    else:
-        await storage.set_system_prompt(user_id, new_prompt)
-        await message.answer("Индивидуальный system prompt сохранён в базе данных ✅")
+        await message.answer("Системный промпт Stand сброшен к значению по умолчанию ✅")
+        return
+
+    # Проверяем синтаксис добавления: /prompt add Имя = Текст или /prompt save Имя = Текст
+    if raw_arg.lower().startswith(("add ", "save ", "добавить ", "сохранить ")):
+        sub = raw_arg.split(maxsplit=1)[1].strip()
+        if "=" in sub:
+            p_name, p_text = sub.split("=", 1)
+            p_name, p_text = p_name.strip(), p_text.strip()
+            if p_name and p_text:
+                await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="main")
+                await storage.set_system_prompt(user_id, p_text)
+                await message.answer(f"Промпт <b>«{html.escape(p_name)}»</b> сохранён и активирован! ✅", parse_mode="HTML")
+                return
+
+    # Проверяем удаление: /prompt del Имя или /prompt delete Имя
+    if raw_arg.lower().startswith(("del ", "delete ", "rm ", "удалить ")):
+        p_name = raw_arg.split(maxsplit=1)[1].strip()
+        deleted = await storage.delete_user_prompt_by_name(user_id, name=p_name, mode="main")
+        if deleted:
+            await message.answer(f"Промпт <b>«{html.escape(p_name)}»</b> удалён ✅", parse_mode="HTML")
+        else:
+            await message.answer(f"Сохранённый промпт <b>«{html.escape(p_name)}»</b> не найден ❌", parse_mode="HTML")
+        return
+
+    # Проверяем переключение по имени пресета
+    matched = await storage.find_stand_preset_by_name_or_id(user_id, raw_arg)
+    if matched:
+        await storage.set_system_prompt(user_id, matched["prompt"])
+        title = matched.get("title") or matched["name"]
+        await message.answer(f"Активирован Stand-промпт: <b>{html.escape(title)}</b> ✅", parse_mode="HTML")
+        return
+
+    # Иначе сохраняем как произвольный промпт
+    await storage.set_system_prompt(user_id, raw_arg)
+    await message.answer("Индивидуальный system prompt сохранён в базе данных ✅")
+
+
+@router.message(Command("persona", "personas", "личность", "личности"))
+async def cmd_personas(message: Message) -> None:
+    """Управление Личностями Аватара (/q)."""
+    user_id = message.from_user.id
+    state = await storage.get(user_id, chat_id=message.chat.id)
+    args = message.text.split(maxsplit=1)
+
+    if len(args) == 1:
+        personas = await storage.get_all_personas(user_id)
+        current_prompt = state.quick_prompt or settings.quick_prompt
+        await message.answer(
+            _render_personas_menu_text(state, personas),
+            parse_mode="HTML",
+            reply_markup=personas_menu_keyboard(personas, current_prompt),
+        )
+        return
+
+    raw_arg = args[1].strip()
+    if raw_arg.lower() in ("reset", "clear", "default", "сброс", "дефолт"):
+        await storage.set_quick_prompt(user_id, "")
+        await message.answer("Личность Аватара сброшена к дефолтному суфлёру ✅")
+        return
+
+    # Создание личности: /persona add Имя = Текст
+    if raw_arg.lower().startswith(("add ", "save ", "добавить ", "сохранить ")):
+        sub = raw_arg.split(maxsplit=1)[1].strip()
+        if "=" in sub:
+            p_name, p_text = sub.split("=", 1)
+            p_name, p_text = p_name.strip(), p_text.strip()
+            if p_name and p_text:
+                await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
+                await storage.set_quick_prompt(user_id, p_text)
+                await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
+                return
+
+    # Удаление личности: /persona del Имя
+    if raw_arg.lower().startswith(("del ", "delete ", "rm ", "удалить ")):
+        p_name = raw_arg.split(maxsplit=1)[1].strip()
+        deleted = await storage.delete_user_prompt_by_name(user_id, name=p_name, mode="quick")
+        if deleted:
+            await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> удалена ✅", parse_mode="HTML")
+        else:
+            await message.answer(f"Пользовательская личность <b>«{html.escape(p_name)}»</b> не найдена ❌", parse_mode="HTML")
+        return
+
+    # Переключение по имени личности
+    matched = await storage.find_persona_by_name_or_id(user_id, raw_arg)
+    if matched:
+        await storage.set_quick_prompt(user_id, matched["prompt"])
+        title = matched.get("title") or matched["name"]
+        await message.answer(f"Активирована личность: <b>{html.escape(title)}</b> 🎭", parse_mode="HTML")
+        return
+
+    await storage.set_quick_prompt(user_id, raw_arg)
+    await message.answer("Индивидуальный промпт для Режима Аватара сохранён ✅")
 
 
 @router.message(Command("qprompt", "prompt_q"))
@@ -405,13 +554,33 @@ async def cmd_qprompt(message: Message) -> None:
         )
         return
 
-    new_prompt = args[1].strip()
-    if new_prompt.lower() in ("reset", "clear", "default", "дефолт", "сброс"):
+    raw_arg = args[1].strip()
+    if raw_arg.lower() in ("reset", "clear", "default", "дефолт", "сброс"):
         await storage.set_quick_prompt(user_id, "")
         await message.answer("Системный промпт для режима /q сброшен к значению по умолчанию ✅")
-    else:
-        await storage.set_quick_prompt(user_id, new_prompt)
-        await message.answer("Индивидуальный промпт для режима /q сохранён в базе данных ✅")
+        return
+
+    # Если пользователь ввёл команду вида /qprompt add Имя = Текст
+    if raw_arg.lower().startswith(("add ", "save ", "добавить ", "сохранить ")):
+        sub = raw_arg.split(maxsplit=1)[1].strip()
+        if "=" in sub:
+            p_name, p_text = sub.split("=", 1)
+            p_name, p_text = p_name.strip(), p_text.strip()
+            if p_name and p_text:
+                await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
+                await storage.set_quick_prompt(user_id, p_text)
+                await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
+                return
+
+    matched = await storage.find_persona_by_name_or_id(user_id, raw_arg)
+    if matched:
+        await storage.set_quick_prompt(user_id, matched["prompt"])
+        title = matched.get("title") or matched["name"]
+        await message.answer(f"Активирована личность: <b>{html.escape(title)}</b> 🎭", parse_mode="HTML")
+        return
+
+    await storage.set_quick_prompt(user_id, raw_arg)
+    await message.answer("Индивидуальный промпт для режима /q сохранён в базе данных ✅")
 
 
 @router.message(Command("tts"))
@@ -1099,6 +1268,230 @@ async def cb_reset_qprompt(callback: CallbackQuery) -> None:
     await callback.answer("Промпт для /q сброшен к дефолтному ✅")
 
 
+@router.callback_query(F.data == "menu:personas")
+async def cb_menu_personas(callback: CallbackQuery) -> None:
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    personas = await storage.get_all_personas(callback.from_user.id)
+    current_prompt = state.quick_prompt or settings.quick_prompt
+    try:
+        await callback.message.edit_text(
+            _render_personas_menu_text(state, personas),
+            parse_mode="HTML",
+            reply_markup=personas_menu_keyboard(personas, current_prompt),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("persona_info:"))
+async def cb_persona_info(callback: CallbackQuery) -> None:
+    persona_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
+    if not persona:
+        await callback.answer("Личность не найдена", show_alert=True)
+        return
+
+    current_prompt = state.quick_prompt or settings.quick_prompt
+    is_active = (persona["prompt"].strip() == current_prompt.strip())
+    is_builtin = persona.get("is_builtin", False)
+    title = persona.get("title") or f"🎭 {persona['name']}"
+
+    text = (
+        f"<b>{html.escape(title)}</b>\n\n"
+        f"Промпт личности:\n<code>{html.escape(persona['prompt'])}</code>\n\n"
+        f"Статус: <b>{'✅ Активна' if is_active else '⚪️ Не активна'}</b>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=persona_view_keyboard(persona["id"], is_active, is_builtin),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("persona_set:"))
+async def cb_persona_set(callback: CallbackQuery) -> None:
+    persona_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
+    if not persona:
+        await callback.answer("Личность не найдена", show_alert=True)
+        return
+
+    await storage.set_quick_prompt(user_id, persona["prompt"])
+    title = persona.get("title") or persona["name"]
+    await callback.answer(f"Личность «{title}» активирована! 🎭", show_alert=True)
+
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    personas = await storage.get_all_personas(user_id)
+    try:
+        await callback.message.edit_text(
+            _render_personas_menu_text(state, personas),
+            parse_mode="HTML",
+            reply_markup=personas_menu_keyboard(personas, persona["prompt"]),
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("persona_del:"))
+async def cb_persona_del(callback: CallbackQuery) -> None:
+    persona_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    try:
+        p_id_int = int(persona_id)
+        deleted = await storage.delete_user_prompt(user_id, p_id_int)
+    except ValueError:
+        deleted = False
+
+    if deleted:
+        await callback.answer("Личность удалена ✅")
+    else:
+        await callback.answer("Не удалось удалить личность ❌", show_alert=True)
+
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    personas = await storage.get_all_personas(user_id)
+    current_prompt = state.quick_prompt or settings.quick_prompt
+    try:
+        await callback.message.edit_text(
+            _render_personas_menu_text(state, personas),
+            parse_mode="HTML",
+            reply_markup=personas_menu_keyboard(personas, current_prompt),
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "persona:add_hint")
+async def cb_persona_add_hint(callback: CallbackQuery) -> None:
+    await callback.answer(
+        "Чтобы создать личность, отправьте команду:\n/persona add Имя = Описание стиля",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data == "menu:prompts")
+async def cb_menu_prompts(callback: CallbackQuery) -> None:
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    presets = await storage.get_all_stand_presets(callback.from_user.id)
+    current_prompt = state.system_prompt or settings.system_prompt or ""
+    try:
+        await callback.message.edit_text(
+            _render_stand_prompts_menu_text(state, presets),
+            parse_mode="HTML",
+            reply_markup=stand_prompts_menu_keyboard(presets, current_prompt),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stand_info:"))
+async def cb_stand_info(callback: CallbackQuery) -> None:
+    preset_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    preset = await storage.find_stand_preset_by_name_or_id(user_id, preset_id)
+    if not preset:
+        await callback.answer("Промпт не найден", show_alert=True)
+        return
+
+    current_prompt = state.system_prompt or settings.system_prompt or ""
+    is_active = (preset["prompt"].strip() == current_prompt.strip())
+    is_builtin = preset.get("is_builtin", False)
+    title = preset.get("title") or f"🥊 {preset['name']}"
+
+    text = (
+        f"<b>{html.escape(title)}</b>\n\n"
+        f"Системный промпт:\n<code>{html.escape(preset['prompt'])}</code>\n\n"
+        f"Статус: <b>{'✅ Активен' if is_active else '⚪️ Не активен'}</b>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=stand_prompt_view_keyboard(preset["id"], is_active, is_builtin),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stand_set:"))
+async def cb_stand_set(callback: CallbackQuery) -> None:
+    preset_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    preset = await storage.find_stand_preset_by_name_or_id(user_id, preset_id)
+    if not preset:
+        await callback.answer("Промпт не найден", show_alert=True)
+        return
+
+    await storage.set_system_prompt(user_id, preset["prompt"])
+    title = preset.get("title") or preset["name"]
+    await callback.answer(f"Промпт «{title}» активирован! 🥊", show_alert=True)
+
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    presets = await storage.get_all_stand_presets(user_id)
+    try:
+        await callback.message.edit_text(
+            _render_stand_prompts_menu_text(state, presets),
+            parse_mode="HTML",
+            reply_markup=stand_prompts_menu_keyboard(presets, preset["prompt"]),
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("stand_del:"))
+async def cb_stand_del(callback: CallbackQuery) -> None:
+    preset_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    try:
+        p_id_int = int(preset_id)
+        deleted = await storage.delete_user_prompt(user_id, p_id_int)
+    except ValueError:
+        deleted = False
+
+    if deleted:
+        await callback.answer("Промпт удален ✅")
+    else:
+        await callback.answer("Не удалось удалить промпт ❌", show_alert=True)
+
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    presets = await storage.get_all_stand_presets(user_id)
+    current_prompt = state.system_prompt or settings.system_prompt or ""
+    try:
+        await callback.message.edit_text(
+            _render_stand_prompts_menu_text(state, presets),
+            parse_mode="HTML",
+            reply_markup=stand_prompts_menu_keyboard(presets, current_prompt),
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "stand:add_hint")
+async def cb_stand_add_hint(callback: CallbackQuery) -> None:
+    await callback.answer(
+        "Чтобы сохранить свой Stand-промпт, отправьте команду:\n/prompt add Имя = Текст промпта",
+        show_alert=True,
+    )
+
+
 @router.callback_query(F.data.in_({"menu:limits", "refresh_limits"}))
 async def cb_menu_limits(callback: CallbackQuery) -> None:
     text = await _render_limits_menu_text(callback.from_user.id)
@@ -1545,13 +1938,17 @@ async def cmd_q(message: Message) -> None:
         if replied_text:
             intent = clean_text or "Сформулируй естественный и подходящий ответ на это сообщение."
             content_input = (
-                "КОНТЕКСТ ДИАЛОГА (сообщение или цитата собеседника):\n"
-                "--------------------------------------------------\n"
+                "ВХОДЯЩИЙ ДИАЛОГ (сообщение собеседника в чате):\n"
+                "\"\"\"\n"
                 f"{replied_text}\n"
-                "--------------------------------------------------\n\n"
-                "УКАЗАНИЯ ПОЛЬЗОВАТЕЛЯ К ОТВЕТУ:\n"
-                f"{intent}\n\n"
-                "(Напиши готовый ответ собеседнику от первого лица)"
+                "\"\"\"\n\n"
+                "ЧЕРНОВИК / ТЕЗИС ПОЛЬЗОВАТЕЛЯ ДЛЯ ОТВЕТА СОБЕСЕДНИКУ:\n"
+                "\"\"\"\n"
+                f"{intent}\n"
+                "\"\"\"\n\n"
+                "ИНСТРУКЦИЯ СУФЛЁРУ:\n"
+                "Сформулируй готовый ответ собеседнику от первого лица пользователя («я», «мне») на основе его тезиса. "
+                "Пользователь НЕ обращается к тебе (ИИ). Не отвечай пользователю. Выдай ТОЛЬКО текст для отправки собеседнику."
             )
             history_text = f"[Ответ на /q: «{replied_text[:60]}...»] {intent}"
             await _process_user_turn(
@@ -1566,10 +1963,10 @@ async def cmd_q(message: Message) -> None:
     if not clean_text:
         await message.answer(
             "🎭 <b>Режим Аватара (/q):</b>\n\n"
-            "Использование: <code>/q ваши указания/мысль</code>\n"
-            "Или ответьте командой <code>/q</code> на любое входящее сообщение/фото в чате.\n\n"
+            "Использование: <code>/q ваши указания/черновик</code>\n"
+            "Или ответьте командой <code>/q</code> на любое входящее сообщение в чате.\n\n"
             "• Бот выступает вашим текстовым суфлёром и пишет <b>готовый ответ от 1-го лица</b> («я», «мне») без цитирования и лишних фраз.\n"
-            "• Имеет <b>собственную изолированную память</b> и отдельный промпт (настройка: <code>/qprompt</code>).",
+            "• Управление личностями: <code>/personas</code> (Бро, Бизнес, Сарказм, Краткий, Флирт и свои).",
             parse_mode="HTML",
         )
         return
@@ -1583,7 +1980,10 @@ async def cmd_q(message: Message) -> None:
             img_bytes, mime = img_data
             image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
             pure_text = clean_text.replace(img_url, "").strip() or "Опиши подробно, что изображено на этой картинке."
-            content_input = [image_part, pure_text]
+            content_input = [
+                image_part,
+                f"ЧЕРНОВИК ПОЛЬЗОВАТЕЛЯ: {pure_text}\n\nСформулируй готовое сообщение от 1-го лица для отправки собеседнику."
+            ]
             history_text = f"[Изображение по ссылке /q] {pure_text}"
             await _process_user_turn(
                 message=message,
@@ -1594,9 +1994,18 @@ async def cmd_q(message: Message) -> None:
             )
             return
 
+    content_input = (
+        "ЧЕРНОВИК / ТЕЗИС ПОЛЬЗОВАТЕЛЯ ДЛЯ ОТВЕТА СОБЕСЕДНИКУ В ЧАТЕ:\n"
+        "\"\"\"\n"
+        f"{clean_text}\n"
+        "\"\"\"\n\n"
+        "ИНСТРУКЦИЯ СУФЛЁРУ:\n"
+        "Преврати этот черновик/тезис в идеальное готовое сообщение от первого лица («я») для отправки собеседнику. "
+        "Пользователь НЕ обращается к тебе (ИИ). Не отвечай пользователю. Выдай ТОЛЬКО готовое сообщение для отправки."
+    )
     await _process_user_turn(
         message=message,
-        content_input=clean_text,
+        content_input=content_input,
         history_text=clean_text,
         no_quote=True,
         use_quick_prompt=True,
@@ -1973,7 +2382,23 @@ async def _execute_inline_generation(
                 img_bytes, mime = img_data
                 image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
                 clean_query = raw_query.replace(img_url, "").strip() or "Опиши подробно, что изображено на этой картинке."
-                content_input = [image_part, clean_query]
+                if is_quick:
+                    content_input = [
+                        image_part,
+                        f"ЧЕРНОВИК ПОЛЬЗОВАТЕЛЯ: {clean_query}\n\nСформулируй готовое сообщение от 1-го лица для отправки в чат."
+                    ]
+                else:
+                    content_input = [image_part, clean_query]
+        elif is_quick:
+            content_input = (
+                "ЧЕРНОВИК / ТЕЗИС ПОЛЬЗОВАТЕЛЯ ДЛЯ ЕГО ЧАТА:\n"
+                "\"\"\"\n"
+                f"{raw_query}\n"
+                "\"\"\"\n\n"
+                "ИНСТРУКЦИЯ СУФЛЁРУ:\n"
+                "Преврати этот черновик/тезис в идеальное готовое сообщение от первого лица («я») для отправки собеседнику. "
+                "Пользователь НЕ обращается к тебе (ИИ). Не отвечай пользователю. Выдай ТОЛЬКО готовое сообщение для отправки."
+            )
 
         effective_prompt = (
             (state.quick_prompt or settings.quick_prompt)

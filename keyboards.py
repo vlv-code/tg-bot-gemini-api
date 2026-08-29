@@ -7,9 +7,10 @@ def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню бота со всеми разделами."""
     buttons = [
         [InlineKeyboardButton(text="🤖 Модель Gemini", callback_data="menu:model")],
+        [InlineKeyboardButton(text="🎭 Личности Аватара (/q)", callback_data="menu:personas")],
+        [InlineKeyboardButton(text="🥊 Промпты Stand-режима", callback_data="menu:prompts")],
         [InlineKeyboardButton(text="🎙 Настройки озвучки (TTS)", callback_data="menu:tts")],
         [InlineKeyboardButton(text="⚙️ Параметры чата и история", callback_data="menu:settings")],
-        [InlineKeyboardButton(text="📝 Системный промпт", callback_data="menu:prompt")],
         [InlineKeyboardButton(text="📊 Лимиты запросов", callback_data="menu:limits")],
     ]
     if is_admin:
@@ -123,7 +124,8 @@ def clear_history_chats_keyboard(user_chats: list[dict]) -> InlineKeyboardMarkup
 def prompt_keyboard() -> InlineKeyboardMarkup:
     """Меню системного промпта Stand-режима."""
     buttons = [
-        [InlineKeyboardButton(text="🎭 Промпт Режима Аватара (/q)", callback_data="menu:qprompt")],
+        [InlineKeyboardButton(text="📚 Каталог промптов Stand", callback_data="menu:prompts")],
+        [InlineKeyboardButton(text="🎭 Личности Аватара (/q)", callback_data="menu:personas")],
         [InlineKeyboardButton(text="🔄 Сбросить промпт на дефолтный", callback_data="reset_prompt")],
         [InlineKeyboardButton(text="◀️ Назад в главное меню", callback_data="menu:main")],
     ]
@@ -133,10 +135,76 @@ def prompt_keyboard() -> InlineKeyboardMarkup:
 def qprompt_keyboard() -> InlineKeyboardMarkup:
     """Меню системного промпта Режима Аватара (/q)."""
     buttons = [
+        [InlineKeyboardButton(text="🎭 Выбрать Личность Аватара", callback_data="menu:personas")],
         [InlineKeyboardButton(text="🔄 Сбросить /q промпт на дефолтный", callback_data="reset_qprompt")],
         [InlineKeyboardButton(text="🥊 Промпт Stand-режима", callback_data="menu:prompt")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu:main")],
     ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def personas_menu_keyboard(personas: list[dict], current_prompt: str) -> InlineKeyboardMarkup:
+    """Меню выбора Личностей Аватара."""
+    buttons = []
+    # Отображаем личности кнопками
+    for p in personas:
+        p_name = p["name"]
+        p_title = p.get("title") or f"🎭 {p_name}"
+        is_active = (current_prompt.strip() == p["prompt"].strip())
+        mark = "✅ " if is_active else ""
+        btn_text = f"{mark}{p_title}"
+        if len(btn_text) > 32:
+            btn_text = btn_text[:31] + "…"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"persona_info:{p['id']}")])
+
+    buttons.append([
+        InlineKeyboardButton(text="➕ Создать личность", callback_data="persona:add_hint"),
+        InlineKeyboardButton(text="🔄 Дефолт", callback_data="reset_qprompt"),
+    ])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в главное меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def persona_view_keyboard(persona_id: str | int, is_active: bool, is_builtin: bool) -> InlineKeyboardMarkup:
+    """Клавиатура просмотра и управления конкретной личностью."""
+    buttons = []
+    if not is_active:
+        buttons.append([InlineKeyboardButton(text="✅ Активировать эту личность", callback_data=f"persona_set:{persona_id}")])
+    if not is_builtin:
+        buttons.append([InlineKeyboardButton(text="❌ Удалить личность", callback_data=f"persona_del:{persona_id}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад к списку личностей", callback_data="menu:personas")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def stand_prompts_menu_keyboard(presets: list[dict], current_prompt: str) -> InlineKeyboardMarkup:
+    """Меню пресетов и системных промптов Stand-режима."""
+    buttons = []
+    for p in presets:
+        p_name = p["name"]
+        p_title = p.get("title") or f"🥊 {p_name}"
+        is_active = (current_prompt.strip() == p["prompt"].strip())
+        mark = "✅ " if is_active else ""
+        btn_text = f"{mark}{p_title}"
+        if len(btn_text) > 32:
+            btn_text = btn_text[:31] + "…"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"stand_info:{p['id']}")])
+
+    buttons.append([
+        InlineKeyboardButton(text="➕ Создать промпт", callback_data="stand:add_hint"),
+        InlineKeyboardButton(text="🔄 Дефолт", callback_data="reset_prompt"),
+    ])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в главное меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def stand_prompt_view_keyboard(preset_id: str | int, is_active: bool, is_builtin: bool) -> InlineKeyboardMarkup:
+    """Клавиатура просмотра и управления Stand-пресетом."""
+    buttons = []
+    if not is_active:
+        buttons.append([InlineKeyboardButton(text="✅ Активировать этот промпт", callback_data=f"stand_set:{preset_id}")])
+    if not is_builtin:
+        buttons.append([InlineKeyboardButton(text="❌ Удалить промпт", callback_data=f"stand_del:{preset_id}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад к списку промптов", callback_data="menu:prompts")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

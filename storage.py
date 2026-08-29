@@ -196,7 +196,20 @@ class UserStorage:
                 """
             )
             await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tts_cache_key ON tts_cache (cache_key)"
+                """
+                CREATE TABLE IF NOT EXISTS user_prompts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'main',
+                    name TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (user_id, mode, name)
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_prompts_user_mode ON user_prompts (user_id, mode)"
             )
             await db.commit()
 
@@ -661,6 +674,178 @@ class UserStorage:
             (key, text.strip(), voice, model, file_id),
         )
         await db.commit()
+
+    # --- Управление сохранёнными личностями (Аватар) и промптами (Stand) ---
+
+    async def get_saved_prompts(self, user_id: int, mode: str = "main") -> list[dict]:
+        """Возвращает список сохранённых пользователем промптов/личностей."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            """
+            SELECT id, name, prompt, created_at
+            FROM user_prompts
+            WHERE user_id = ? AND mode = ?
+            ORDER BY id ASC
+            """,
+            (user_id, mode),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "prompt": row["prompt"],
+                "created_at": row["created_at"],
+                "is_builtin": False,
+            }
+            for row in rows
+        ]
+
+    async def get_all_personas(self, user_id: int) -> list[dict]:
+        """Возвращает встроенные личности + сохранённые пользователем личности Аватара."""
+        user_personas = await self.get_saved_prompts(user_id, mode="quick")
+        user_names = {p["name"].lower() for p in user_personas}
+        
+        combined: list[dict] = []
+        # Встроенные дефолтные личности
+        for idx, bp in enumerate(DEFAULT_AVATAR_PERSONAS, start=1):
+            if bp["name"].lower() not in user_names:
+                combined.append({
+                    "id": f"builtin_{idx}",
+                    "name": bp["name"],
+                    "title": bp["title"],
+                    "prompt": bp["prompt"],
+                    "is_builtin": True,
+                })
+        combined.extend(user_personas)
+        return combined
+
+    async def get_all_stand_presets(self, user_id: int) -> list[dict]:
+        """Возвращает встроенные пресеты + сохранённые пользователем промпты Stand."""
+        user_presets = await self.get_saved_prompts(user_id, mode="main")
+        user_names = {p["name"].lower() for p in user_presets}
+
+        combined: list[dict] = []
+        for idx, bp in enumerate(DEFAULT_STAND_PRESETS, start=1):
+            if bp["name"].lower() not in user_names:
+                combined.append({
+                    "id": f"builtin_{idx}",
+                    "name": bp["name"],
+                    "title": bp["title"],
+                    "prompt": bp["prompt"],
+                    "is_builtin": True,
+                })
+        combined.extend(user_presets)
+        return combined
+
+    async def save_user_prompt(self, user_id: int, name: str, prompt: str, mode: str = "main") -> int:
+        """Сохраняет или обновляет именованный промпт / личность."""
+        db = await self._ensure_db()
+        await db.execute(
+            """
+            INSERT INTO user_prompts (user_id, mode, name, prompt)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, mode, name) DO UPDATE SET prompt = excluded.prompt
+            """,
+            (user_id, mode, name.strip(), prompt.strip()),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT id FROM user_prompts WHERE user_id = ? AND mode = ? AND name = ?",
+            (user_id, mode, name.strip()),
+        )
+        row = await cursor.fetchone()
+        return row["id"] if row else 0
+
+    async def delete_user_prompt(self, user_id: int, prompt_id: int) -> bool:
+        """Удаляет сохранённый промпт по id."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "DELETE FROM user_prompts WHERE id = ? AND user_id = ?",
+            (prompt_id, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def delete_user_prompt_by_name(self, user_id: int, name: str, mode: str = "main") -> bool:
+        """Удаляет сохранённый промпт по имени."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "DELETE FROM user_prompts WHERE user_id = ? AND mode = ? AND lower(name) = lower(?)",
+            (user_id, mode, name.strip()),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def find_persona_by_name_or_id(self, user_id: int, identifier: str) -> Optional[dict]:
+        """Ищет личность Аватара по названию или id."""
+        all_personas = await self.get_all_personas(user_id)
+        ident_clean = identifier.strip().lower()
+        for p in all_personas:
+            if str(p["id"]).lower() == ident_clean or p["name"].lower() == ident_clean:
+                return p
+        return None
+
+    async def find_stand_preset_by_name_or_id(self, user_id: int, identifier: str) -> Optional[dict]:
+        """Ищет пресет Stand по названию или id."""
+        all_presets = await self.get_all_stand_presets(user_id)
+        ident_clean = identifier.strip().lower()
+        for p in all_presets:
+            if str(p["id"]).lower() == ident_clean or p["name"].lower() == ident_clean:
+                return p
+        return None
+
+
+DEFAULT_AVATAR_PERSONAS = [
+    {
+        "name": "Бро",
+        "title": "🕶 Бро / Свой парень",
+        "prompt": "Отвечай как близкий друг и свой парень. Живой разговорный стиль, лёгкий сленг, кратко и по делу, без официоза и без лишних церемоний.",
+    },
+    {
+        "name": "Бизнес",
+        "title": "💼 Деловой / Профи",
+        "prompt": "Отвечай в профессиональном деловом стиле. Вежливо, чётко, структурированно, без воды, конструктивно и уверенно.",
+    },
+    {
+        "name": "Сарказм",
+        "title": "😈 Саркастичный / Ироничный",
+        "prompt": "Отвечай остроумно, с лёгкой иронией, подколом или сарказмом, но без токсичной грубости.",
+    },
+    {
+        "name": "Краткий",
+        "title": "⚡️ Лаконичный / 1-5 слов",
+        "prompt": "Отвечай максимально кратко: от 1 до 5 слов. Минимум текста, максимум конкретики, без лишних знаков и вводных слов.",
+    },
+    {
+        "name": "Флирт",
+        "title": "💫 Обаятельный / Флирт",
+        "prompt": "Отвечай игриво, обаятельно, тепло, с лёгким намёком на флирт и комплименты.",
+    },
+]
+
+DEFAULT_STAND_PRESETS = [
+    {
+        "name": "Кодер",
+        "title": "💻 Senior Developer",
+        "prompt": "Ты — Senior Software Engineer. Отвечай чистым кодом с лучшими практиками, объясняй архитектурные решения кратко и емко.",
+    },
+    {
+        "name": "Сисадмин",
+        "title": "🛠 Linux DevOps / Sysadmin",
+        "prompt": "Ты — опытный Linux DevOps и Sysadmin. Сразу давай рабочие команды, bash-скрипты, docker-compose и конфигурации, без лишних вступлений.",
+    },
+    {
+        "name": "Переводчик",
+        "title": "🌍 Синхронный переводчик",
+        "prompt": "Ты — профессиональный синхронный переводчик. Переводи точно, с сохранением идиом, сленга и контекста диалога.",
+    },
+    {
+        "name": "Аналитик",
+        "title": "📊 Бизнес-аналитик",
+        "prompt": "Ты — стратегический аналитик. Структурируй ответы списками, выделяй плюсы/минусы, риски и выводы.",
+    },
+]
 
 
 

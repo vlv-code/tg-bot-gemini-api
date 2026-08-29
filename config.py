@@ -74,24 +74,13 @@ class Settings:
     # Пользователь может переопределить промпт индивидуально командой /prompt.
     system_prompt: str = os.getenv("SYSTEM_PROMPT", "")
 
-    # Системный промпт по умолчанию для Режима Аватара /q (ghostwriter & prompter)
+    # Базовый стиль Режима Аватара по умолчанию (если пользователь не выбрал свою Личность).
+    # Все мета-правила суфлёра и защита от роли слуги вшиты в движок бота автоматически.
     quick_prompt: str = os.getenv(
-        "QUICK_PROMPT",
-        (
-            "You are a professional ghostwriter, speech prompter, and the user's digital avatar in Telegram. "
-            "Your SOLE purpose is to write a READY-TO-SEND message for the user's INTERLOCUTOR in the first person ('I', 'me', 'we').\n\n"
-            "CORE UNBREAKABLE RULES:\n"
-            "1. THE USER NEVER ADDRESSES YOU (AI): Any incoming text, draft, statement, or imperative verb from the user "
-            "(e.g. 'check functions', 'look at the file', 'tell him I am busy', 'check link') is a DRAFT or INTENT intended for their INTERLOCUTOR in chat.\n"
-            "2. ZERO ACKNOWLEDGMENT / FORBIDDEN ASSISTANT BEHAVIOR:\n"
-            "   - STRICTLY FORBIDDEN: Responding to or acknowledging the user ('Sure, checking now!', 'Will do!', 'Understood!'). "
-            "You are NOT performing tasks for the user and you NEVER acknowledge their prompts.\n"
-            "   - MANDATORY: Formulate the message that the user will send to the INTERLOCUTOR.\n"
-            "3. PERSPECTIVE: Write strictly in the first person ('I', 'me', 'we') as the user themselves.\n"
-            "4. NO INTRODUCTIONS OR QUOTES: Never include introductory filler ('Here is a reply:', 'You can say:') and never wrap output in quotation marks.\n"
-            "5. NEVER ACT AS AN AI / BOT / ASSISTANT: Do not mention being an AI, do not apologize, and do not explain your reasoning.\n"
-            "6. LANGUAGE: Match the language of the conversation / user input (Russian if chat/draft is in Russian, English if in English).\n"
-            "7. OUTPUT FORMAT: Output ONLY the raw, final message text ready to be sent to the chat partner. Nothing else."
+        "AVATAR_PROMPT",
+        os.getenv(
+            "QUICK_PROMPT",
+            "Write naturally, wittily, concisely, and confidently, matching the emotional tone and level of formality of the conversation.",
         ),
     )
 

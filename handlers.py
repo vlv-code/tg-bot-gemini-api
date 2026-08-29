@@ -2432,20 +2432,26 @@ def _cleanup_inline_sessions() -> None:
             _inline_sessions.pop(sid, None)
 
 
-def _parse_persona_prefix(raw_query: str, personas: list[dict]) -> tuple[str, Optional[dict], bool]:
+def _parse_inline_query_intent(raw_query: str, personas: list[dict]) -> tuple[str, Optional[dict], str]:
     """
-    Определяет, указал ли пользователь префикс стиля (например: /kawaii ..., bro: ..., /biz ...).
-    Возвращает (очищенный_запрос, выбранная_персона, явный_ли_запрос_аватара).
+    Парсит интент инлайн-запроса:
+    Возвращает (очищенный_запрос, выбранная_персона, режим: 'avatar' | 'stand' | 'default').
     """
     clean_q = raw_query.strip()
-    is_explicit_q = False
 
+    # Явный префикс Stand
+    for prefix in ("/stand ", "stand: ", "/stand: ", "stand "):
+        if clean_q.lower().startswith(prefix):
+            clean_q = clean_q[len(prefix):].strip()
+            return clean_q, None, "stand"
+
+    # Явный префикс Аватара
     for prefix in ("/q ", "q ", "/quick ", "quick ", "/avatar ", "avatar "):
         if clean_q.lower().startswith(prefix):
             clean_q = clean_q[len(prefix):].strip()
-            is_explicit_q = True
-            break
+            return clean_q, None, "avatar"
 
+    # Проверяем совпадение по имени или id любой из доступных личностей Аватара
     for p in personas:
         p_name = p["name"].lower()
         p_id = str(p["id"]).lower()
@@ -2457,9 +2463,9 @@ def _parse_persona_prefix(raw_query: str, personas: list[dict]) -> tuple[str, Op
         for c in candidates:
             if clean_q.lower().startswith(c):
                 clean_q = clean_q[len(c):].strip()
-                return clean_q, p, True
+                return clean_q, p, "avatar"
 
-    return clean_q, None, is_explicit_q
+    return clean_q, None, "default"
 
 
 async def _execute_inline_generation(
@@ -2473,17 +2479,17 @@ async def _execute_inline_generation(
     """Генерирует ответ Gemini (текст или анализ картинки по ссылке) и обновляет инлайн-сообщение."""
     session = _inline_sessions.get(session_id)
     if session:
-        raw_query = raw_query_override or session.query
+        raw_query = session.query
         is_quick = session.is_quick
         interactive = session.interactive
         persona_prompt = session.persona_prompt
         persona_name = session.persona_name
     else:
         raw_query = raw_query_override or ""
-        is_quick = True
-        interactive = False
+        is_quick = not session_id.startswith("stand_")
+        interactive = session_id.startswith(("prev_", "p_"))
         persona_prompt = ""
-        persona_name = "Аватар"
+        persona_name = "Аватар" if is_quick else "Stand"
 
     try:
         status_text = (
@@ -2491,11 +2497,18 @@ async def _execute_inline_generation(
             if is_quick
             else f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n✨ <i>Gemini генерирует ответ...</i>"
         )
+        status_markup = (
+            inline_control_keyboard(session_id)
+            if interactive
+            else InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{session_id}")]]
+            )
+        )
         await bot.edit_message_text(
             text=status_text,
             inline_message_id=inline_message_id,
             parse_mode="HTML",
-            reply_markup=inline_control_keyboard(session_id) if interactive else None,
+            reply_markup=status_markup,
         )
     except TelegramBadRequest:
         pass
@@ -2541,6 +2554,7 @@ async def _execute_inline_generation(
                 else:
                     content_input = [image_part, clean_query]
         elif is_quick:
+            regen_hint = "\n4. VARIATION: Formulate a FRESH and distinct alternative variation of the message." if temperature_jitter else ""
             content_input = (
                 "USER DRAFT / INTENT TO BE SENT TO CHAT PARTNER:\n"
                 "\"\"\"\n"
@@ -2550,6 +2564,7 @@ async def _execute_inline_generation(
                 "1. Formulate the ready-to-send outgoing message for the chat partner in the first person ('I', 'me') based on the draft.\n"
                 "2. Strictly NEVER respond to or acknowledge the user ('Sure, doing it', 'Checking now'). The user is NOT addressing you.\n"
                 "3. Output ONLY the raw final message for the interlocutor in the matching conversation language."
+                f"{regen_hint}"
             )
 
         effective_prompt = (
@@ -2636,7 +2651,7 @@ async def _execute_inline_generation(
                     text=chunk_text,
                     entities=chunk_entities,
                     inline_message_id=inline_message_id,
-                    reply_markup=markup,
+                    reply_markup=None,
                 )
                 return
             except TelegramBadRequest:
@@ -2840,11 +2855,11 @@ async def handle_inline(query: InlineQuery) -> None:
     state = await storage.get(user_id)
     personas = await storage.get_all_personas(user_id)
 
-    clean_query, matched_persona, is_explicit_avatar = _parse_persona_prefix(raw_query, personas)
+    clean_query, matched_persona, intent = _parse_inline_query_intent(raw_query, personas)
     if not clean_query:
         clean_query = raw_query
 
-    # Определяем активную личность
+    # Определяем активную личность Аватара
     if matched_persona:
         active_p_id = matched_persona["id"]
         active_p_name = matched_persona.get("title") or matched_persona["name"]
@@ -2862,9 +2877,37 @@ async def handle_inline(query: InlineQuery) -> None:
     query_hash = hashlib.sha256(f"{clean_query}:{time.time()}".encode("utf-8")).hexdigest()[:16]
     prompt_short = clean_query[:65] + ("…" if len(clean_query) > 65 else "")
 
-    results = []
+    # 1. Основной режим: 🥊 Stand (ИИ-стенд / помощник)
+    stand_sid = f"stand_{query_hash}"
+    _inline_sessions[stand_sid] = InlineSession(
+        session_id=stand_sid,
+        user_id=user_id,
+        query=clean_query,
+        persona_id=None,
+        persona_name="Stand",
+        persona_prompt="",
+        is_quick=False,
+        interactive=False,
+    )
+    is_image = bool(URL_REGEX.search(clean_query))
+    stand_title = "🖼 Stand: Анализ картинки" if is_image else "🥊 Stand (ИИ-стенд)"
+    stand_article = InlineQueryResultArticle(
+        id=stand_sid,
+        title=stand_title,
+        description=f"«{prompt_short}» • Ответ ИИ с цитатой",
+        input_message_content=InputTextMessageContent(
+            message_text=(
+                f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(clean_query)}</blockquote>\n\n"
+                "⏳ <i>Запрос отправлен в Stand-режиме. Генерирую ответ...</i>"
+            ),
+            parse_mode="HTML",
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{stand_sid}")]]
+        ),
+    )
 
-    # Карточка 1: ⚡️ Быстро: Avatar (отправить сразу не глядя без кнопок)
+    # 2. Основной режим: ⚡️ Avatar: Быстро (отправить сразу от 1-го лица без кнопок)
     fast_sid = f"fast_{query_hash}"
     _inline_sessions[fast_sid] = InlineSession(
         session_id=fast_sid,
@@ -2876,19 +2919,20 @@ async def handle_inline(query: InlineQuery) -> None:
         is_quick=True,
         interactive=False,
     )
-    results.append(
-        InlineQueryResultArticle(
-            id=fast_sid,
-            title=f"⚡️ Быстро: Avatar ({active_p_name})",
-            description=f"«{prompt_short}» • Отправить сразу без кнопок",
-            input_message_content=InputTextMessageContent(
-                message_text="⏳ <i>Генерирую сообщение от вашего лица...</i>",
-                parse_mode="HTML",
-            ),
-        )
+    fast_article = InlineQueryResultArticle(
+        id=fast_sid,
+        title=f"⚡️ Avatar: Быстро ({active_p_name})",
+        description=f"«{prompt_short}» • Отправить сразу от 1-го лица",
+        input_message_content=InputTextMessageContent(
+            message_text="⏳ <i>Генерирую сообщение от вашего лица...</i>",
+            parse_mode="HTML",
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{fast_sid}")]]
+        ),
     )
 
-    # Карточка 2: 👁 Предпросмотр: Avatar (с кнопками управления/перегенерации)
+    # 3. Основной режим: 👁 Avatar: Предпросмотр (от 1-го лица с кнопками перегенерации и смены стиля)
     prev_sid = f"prev_{query_hash}"
     _inline_sessions[prev_sid] = InlineSession(
         session_id=prev_sid,
@@ -2900,22 +2944,21 @@ async def handle_inline(query: InlineQuery) -> None:
         is_quick=True,
         interactive=True,
     )
-    results.append(
-        InlineQueryResultArticle(
-            id=prev_sid,
-            title=f"👁 Предпросмотр: Avatar ({active_p_name})",
-            description=f"«{prompt_short}» • С кнопками перегенерации и смены стиля",
-            input_message_content=InputTextMessageContent(
-                message_text=f"⏳ <i>Генерирую сообщение в стиле «{active_p_name}»...</i>",
-                parse_mode="HTML",
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data="inl_noop")]]
-            ),
-        )
+    prev_article = InlineQueryResultArticle(
+        id=prev_sid,
+        title=f"👁 Avatar: Предпросмотр ({active_p_name})",
+        description=f"«{prompt_short}» • С кнопками перегенерации и смены стиля",
+        input_message_content=InputTextMessageContent(
+            message_text=f"⏳ <i>Генерирую сообщение в стиле «{active_p_name}»...</i>",
+            parse_mode="HTML",
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{prev_sid}")]]
+        ),
     )
 
-    # Карточки 3..N: Другие Личности Аватара из каталога пользователя
+    # 4. Селектор личностей внутри Аватара
+    persona_articles = []
     for p in personas:
         if str(p["id"]) == str(active_p_id):
             continue
@@ -2931,49 +2974,28 @@ async def handle_inline(query: InlineQuery) -> None:
             is_quick=True,
             interactive=True,
         )
-        results.append(
+        persona_articles.append(
             InlineQueryResultArticle(
                 id=p_sid,
-                title=f"🎭 {p_title}",
+                title=f"🎭 Avatar: {p_title}",
                 description=f"«{prompt_short}» • Стиль: {p_title}",
                 input_message_content=InputTextMessageContent(
                     message_text=f"⏳ <i>Генерирую сообщение в стиле «{p_title}»...</i>",
                     parse_mode="HTML",
                 ),
                 reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data="inl_noop")]]
+                    inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{p_sid}")]]
                 ),
             )
         )
 
-    # Карточка: 🥊 Stand-режим
-    stand_sid = f"stand_{query_hash}"
-    _inline_sessions[stand_sid] = InlineSession(
-        session_id=stand_sid,
-        user_id=user_id,
-        query=clean_query,
-        persona_id=None,
-        persona_name="Stand",
-        persona_prompt="",
-        is_quick=False,
-        interactive=False,
-    )
-    is_image = bool(URL_REGEX.search(clean_query))
-    stand_title = "🖼 Stand: Анализ картинки" if is_image else "🥊 Отправить Stand (ИИ-стенд)"
-    results.append(
-        InlineQueryResultArticle(
-            id=stand_sid,
-            title=stand_title,
-            description=f"«{prompt_short}» • Ответ ИИ с цитатой",
-            input_message_content=InputTextMessageContent(
-                message_text=(
-                    f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(clean_query)}</blockquote>\n\n"
-                    "⏳ <i>Запрос отправлен в Stand-режиме. Генерирую ответ...</i>"
-                ),
-                parse_mode="HTML",
-            ),
-        )
-    )
+    # Формируем порядок выдачи:
+    if intent == "avatar":
+        results = [fast_article, prev_article] + persona_articles + [stand_article]
+    elif intent == "stand":
+        results = [stand_article, fast_article, prev_article] + persona_articles
+    else:
+        results = [stand_article, fast_article, prev_article] + persona_articles
 
     await query.answer(
         results=results,
@@ -3019,6 +3041,25 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
 @router.callback_query(F.data == "inl_noop")
 async def cb_inl_noop(callback: CallbackQuery) -> None:
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("inl_start:"))
+async def cb_inl_start(callback: CallbackQuery) -> None:
+    session_id = callback.data.split(":", 1)[1]
+    session = _inline_sessions.get(session_id)
+    if not session:
+        await callback.answer("Сессия устарела. Создайте новый запрос через @bot.", show_alert=True)
+        return
+    await callback.answer("Генерирую... ⏳")
+    if callback.inline_message_id:
+        _run_background_task(
+            _execute_inline_generation(
+                bot=callback.bot,
+                user_id=session.user_id,
+                session_id=session_id,
+                inline_message_id=callback.inline_message_id,
+            )
+        )
 
 
 @router.callback_query(F.data.startswith("inl_regen:"))

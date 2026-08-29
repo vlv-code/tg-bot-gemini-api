@@ -28,6 +28,7 @@ class UserState:
     rich_mode: bool = True
     voice_mode: bool = False
     system_prompt: str = ""
+    quick_prompt: str = ""
     tts_model: str = "gemini-3.1-flash-tts-preview"
     tts_voice: str = "Aoede"
     history: list[Turn] = field(default_factory=list)
@@ -79,6 +80,7 @@ class UserStorage:
                     rich_mode INTEGER NOT NULL DEFAULT 1,
                     voice_mode INTEGER NOT NULL DEFAULT 0,
                     system_prompt TEXT NOT NULL DEFAULT '',
+                    quick_prompt TEXT NOT NULL DEFAULT '',
                     tts_model TEXT NOT NULL DEFAULT '',
                     tts_voice TEXT NOT NULL DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -86,7 +88,7 @@ class UserStorage:
                 """
             )
 
-            # Миграция: добавляем tts_model и tts_voice, если их ещё нет в существующей БД
+            # Миграция: добавляем tts_model, tts_voice и quick_prompt, если их ещё нет в существующей БД
             cursor = await db.execute("PRAGMA table_info(users)")
             columns = [row["name"] for row in await cursor.fetchall()]
             if "tts_model" not in columns:
@@ -96,6 +98,10 @@ class UserStorage:
             if "tts_voice" not in columns:
                 await db.execute(
                     f"ALTER TABLE users ADD COLUMN tts_voice TEXT NOT NULL DEFAULT '{self._default_tts_voice}'"
+                )
+            if "quick_prompt" not in columns:
+                await db.execute(
+                    "ALTER TABLE users ADD COLUMN quick_prompt TEXT NOT NULL DEFAULT ''"
                 )
 
             # Миграция: добавляем chat_id в history, если его ещё нет
@@ -209,8 +215,8 @@ class UserStorage:
         """Гарантирует существование строки пользователя без лишней выборки."""
         await db.execute(
             """
-            INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, tts_model, tts_voice)
-            VALUES (?, ?, 1, 0, '', ?, ?)
+            INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice)
+            VALUES (?, ?, 1, 0, '', '', ?, ?)
             """,
             (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
         )
@@ -223,7 +229,7 @@ class UserStorage:
         target_chat_id = chat_id if chat_id is not None else user_id
 
         cursor = await db.execute(
-            "SELECT model, rich_mode, voice_mode, system_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+            "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -232,6 +238,7 @@ class UserStorage:
         rich_mode = bool(row["rich_mode"])
         voice_mode = bool(row["voice_mode"])
         system_prompt = row["system_prompt"] or ""
+        quick_prompt = row["quick_prompt"] or ""
         tts_model = row["tts_model"] or self._default_tts_model
         tts_voice = row["tts_voice"] or self._default_tts_voice
 
@@ -254,6 +261,7 @@ class UserStorage:
             rich_mode=rich_mode,
             voice_mode=voice_mode,
             system_prompt=system_prompt,
+            quick_prompt=quick_prompt,
             tts_model=tts_model,
             tts_voice=tts_voice,
             history=history,
@@ -265,7 +273,7 @@ class UserStorage:
         await self._ensure_user(db, user_id)
 
         cursor = await db.execute(
-            "SELECT model, rich_mode, voice_mode, system_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+            "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -275,6 +283,7 @@ class UserStorage:
             rich_mode=bool(row["rich_mode"]),
             voice_mode=bool(row["voice_mode"]),
             system_prompt=row["system_prompt"] or "",
+            quick_prompt=row["quick_prompt"] or "",
             tts_model=row["tts_model"] or self._default_tts_model,
             tts_voice=row["tts_voice"] or self._default_tts_voice,
             history=[],
@@ -336,6 +345,15 @@ class UserStorage:
         await self._ensure_user(db, user_id)
         await db.execute(
             "UPDATE users SET system_prompt = ? WHERE user_id = ?",
+            (prompt, user_id),
+        )
+        await db.commit()
+
+    async def set_quick_prompt(self, user_id: int, prompt: str) -> None:
+        db = await self._ensure_db()
+        await self._ensure_user(db, user_id)
+        await db.execute(
+            "UPDATE users SET quick_prompt = ? WHERE user_id = ?",
             (prompt, user_id),
         )
         await db.commit()

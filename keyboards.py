@@ -123,8 +123,19 @@ def clear_history_chats_keyboard(user_chats: list[dict]) -> InlineKeyboardMarkup
 def prompt_keyboard() -> InlineKeyboardMarkup:
     """Меню системного промпта."""
     buttons = [
+        [InlineKeyboardButton(text="⚡️ Промпт для режима /q", callback_data="menu:qprompt")],
         [InlineKeyboardButton(text="🔄 Сбросить промпт на дефолтный", callback_data="reset_prompt")],
         [InlineKeyboardButton(text="◀️ Назад в главное меню", callback_data="menu:main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def qprompt_keyboard() -> InlineKeyboardMarkup:
+    """Меню системного промпта для режима /q."""
+    buttons = [
+        [InlineKeyboardButton(text="🔄 Сбросить /q промпт на дефолтный", callback_data="reset_qprompt")],
+        [InlineKeyboardButton(text="📝 Основной промпт", callback_data="menu:prompt")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu:main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 

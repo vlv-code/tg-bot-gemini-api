@@ -12,6 +12,8 @@ from middlewares import AccessMiddleware
 BOT_COMMANDS = [
     BotCommand(command="menu", description="Главное меню настроек и моделей"),
     BotCommand(command="start", description="Запустить бота и открыть меню"),
+    BotCommand(command="q", description="Чистый ответ Gemini без цитирования вопроса"),
+    BotCommand(command="qprompt", description="Настроить отдельный промпт для режима /q"),
     BotCommand(command="voice", description="Задать вопрос и получить ответ голосом"),
     BotCommand(command="text", description="Задать вопрос и получить ответ текстом"),
     BotCommand(command="model", description="Выбрать основную модель Gemini"),

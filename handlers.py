@@ -191,6 +191,24 @@ def _render_prompt_menu_text(state: UserState) -> str:
     )
 
 
+def _render_qprompt_menu_text(state: UserState) -> str:
+    effective = (
+        state.quick_prompt
+        or settings.quick_prompt
+        or "(не задан — поведение Gemini по умолчанию)"
+    )
+    is_custom = bool(state.quick_prompt)
+    status = " (индивидуальный)" if is_custom else " (глобальный дефолт)"
+
+    return (
+        f"⚡️ <b>Системный промпт для режима /q</b>{status}:\n\n"
+        f"<code>{html.escape(effective)}</code>\n\n"
+        "• Чтобы задать новый промпт: <code>/qprompt текст промпта</code>\n"
+        "• Чтобы сбросить к дефолту: нажмите кнопку ниже или <code>/qprompt reset</code>\n\n"
+        "💡 <i>В режиме /q бот присылает чистый ответ нейросети без цитирования вопроса.</i>"
+    )
+
+
 def _format_with_prompt_quote(prompt: str, response_text: str) -> str:
     """Оформляет исходный запрос цитатой в начале ответа без указания ника."""
     if not prompt:
@@ -356,6 +374,29 @@ async def cmd_prompt(message: Message) -> None:
     else:
         await storage.set_system_prompt(user_id, new_prompt)
         await message.answer("Индивидуальный system prompt сохранён в базе данных ✅")
+
+
+@router.message(Command("qprompt", "prompt_q"))
+async def cmd_qprompt(message: Message) -> None:
+    user_id = message.from_user.id
+    state = await storage.get(user_id, chat_id=message.chat.id)
+    args = message.text.split(maxsplit=1)
+
+    if len(args) == 1:
+        await message.answer(
+            _render_qprompt_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=qprompt_keyboard(),
+        )
+        return
+
+    new_prompt = args[1].strip()
+    if new_prompt.lower() in ("reset", "clear", "default", "дефолт", "сброс"):
+        await storage.set_quick_prompt(user_id, "")
+        await message.answer("Системный промпт для режима /q сброшен к значению по умолчанию ✅")
+    else:
+        await storage.set_quick_prompt(user_id, new_prompt)
+        await message.answer("Индивидуальный промпт для режима /q сохранён в базе данных ✅")
 
 
 @router.message(Command("tts"))
@@ -968,6 +1009,37 @@ async def cb_reset_prompt(callback: CallbackQuery) -> None:
     await callback.answer("Промпт сброшен к дефолтному ✅")
 
 
+@router.callback_query(F.data == "menu:qprompt")
+async def cb_menu_qprompt(callback: CallbackQuery) -> None:
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    try:
+        await callback.message.edit_text(
+            _render_qprompt_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=qprompt_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "reset_qprompt")
+async def cb_reset_qprompt(callback: CallbackQuery) -> None:
+    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+    await storage.set_quick_prompt(callback.from_user.id, "")
+    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    try:
+        await callback.message.edit_text(
+            _render_qprompt_menu_text(state),
+            parse_mode="HTML",
+            reply_markup=qprompt_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Промпт для /q сброшен к дефолтному ✅")
+
+
 @router.callback_query(F.data.in_({"menu:limits", "refresh_limits"}))
 async def cb_menu_limits(callback: CallbackQuery) -> None:
     text = await _render_limits_menu_text(callback.from_user.id)
@@ -1220,6 +1292,8 @@ async def _process_user_turn(
     history_text: str,
     force_voice_reply: bool = False,
     force_text_only: bool = False,
+    no_quote: bool = False,
+    use_quick_prompt: bool = False,
 ) -> None:
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -1270,13 +1344,19 @@ async def _process_user_turn(
                 else ChatActionSender.typing
             )
 
+            effective_prompt = (
+                (state.quick_prompt or settings.quick_prompt)
+                if use_quick_prompt
+                else state.system_prompt
+            )
+
             async with action(bot=message.bot, chat_id=message.chat.id):
                 try:
                     response = await gemini_client.ask(
                         model=state.model,
                         history_turns=state.history,
                         message=content_input,
-                        system_prompt=state.system_prompt,
+                        system_prompt=effective_prompt,
                         want_audio=want_audio,
                         voice_name=state.tts_voice,
                     )
@@ -1306,9 +1386,107 @@ async def _process_user_turn(
             message=message,
             state=state,
             response=response,
-            prompt_text=history_text,
+            prompt_text="" if no_quote else history_text,
             want_audio=want_audio,
         )
+
+
+@router.message(Command("q", "quick"))
+async def cmd_q(message: Message) -> None:
+    """Генерация чистого ответа Gemini без цитаты исходного запроса с использованием отдельного промпта."""
+    args = message.text.split(maxsplit=1) if message.text else []
+    clean_text = args[1].strip() if len(args) > 1 else ""
+
+    # 1. Если ответили командой /q на фото или документ
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.photo:
+            photo = replied.photo[-1]
+            file_io = io.BytesIO()
+            await message.bot.download(photo.file_id, destination=file_io)
+            image_bytes = file_io.getvalue()
+            image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+            prompt = clean_text or "Опиши подробно, что изображено на этой картинке."
+            content_input = [image_part, prompt]
+            history_text = f"[Фото из ответа /q] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                no_quote=True,
+                use_quick_prompt=True,
+            )
+            return
+
+        if replied.document and (replied.document.mime_type or "").startswith("image/"):
+            doc = replied.document
+            file_io = io.BytesIO()
+            await message.bot.download(doc.file_id, destination=file_io)
+            doc_bytes = file_io.getvalue()
+            doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=doc.mime_type or "image/jpeg")
+            prompt = clean_text or "Опиши подробно, что изображено на этой картинке."
+            content_input = [doc_part, prompt]
+            history_text = f"[Изображение-документ из ответа /q] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                no_quote=True,
+                use_quick_prompt=True,
+            )
+            return
+
+        if replied.text:
+            prompt = clean_text or "Ответь на это сообщение."
+            content_input = f"Контекст сообщения: {replied.text}\n\nВопрос: {prompt}"
+            history_text = f"[Цитата /q] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                no_quote=True,
+                use_quick_prompt=True,
+            )
+            return
+
+    if not clean_text:
+        await message.answer(
+            "⚡️ <b>Режим чистого ответа (/q):</b>\n\n"
+            "Использование: <code>/q ваш вопрос</code>\n"
+            "Или ответьте командой <code>/q</code> на любое фото/текст.\n\n"
+            "• В этом режиме бот присылает <b>только чистый ответ</b> нейросети без цитирования вашего вопроса.\n"
+            "• Используется отдельный краткий промпт (настройка: <code>/qprompt</code>).",
+            parse_mode="HTML",
+        )
+        return
+
+    # 2. Проверяем URL картинки
+    url_match = URL_REGEX.search(clean_text)
+    if url_match:
+        img_url = url_match.group(0)
+        img_data = await try_download_image_from_url(img_url)
+        if img_data:
+            img_bytes, mime = img_data
+            image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
+            pure_text = clean_text.replace(img_url, "").strip() or "Опиши подробно, что изображено на этой картинке."
+            content_input = [image_part, pure_text]
+            history_text = f"[Изображение по ссылке /q] {pure_text}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                no_quote=True,
+                use_quick_prompt=True,
+            )
+            return
+
+    await _process_user_turn(
+        message=message,
+        content_input=clean_text,
+        history_text=clean_text,
+        no_quote=True,
+        use_quick_prompt=True,
+    )
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -1459,8 +1637,16 @@ async def handle_document(message: Message) -> None:
 
 INLINE_ANSWER_LIMIT = 3900
 
-# Временный кэш промптов (result_id -> raw_query) для inline-генерации
-_pending_inline_prompts: dict[str, str] = {}
+
+@dataclass
+class PendingInlineQuery:
+    user_id: int
+    query: str
+    is_quick: bool = False
+
+
+# Временный кэш промптов (result_id -> PendingInlineQuery) для inline-генерации
+_pending_inline_prompts: dict[str, PendingInlineQuery] = {}
 # Активные задачи debounce для инлайн TTS (user_id -> query_token)
 _active_inline_tts_tasks: dict[int, str] = {}
 
@@ -1582,14 +1768,17 @@ async def _execute_inline_generation(
     user_id: int,
     raw_query: str,
     inline_message_id: str,
+    is_quick: bool = False,
 ) -> None:
     """Генерирует ответ Gemini (текст или анализ картинки по ссылке) и редактирует инлайн-сообщение."""
     try:
+        status_text = (
+            "✨ <i>Gemini генерирует ответ...</i>"
+            if is_quick
+            else f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n✨ <i>Gemini генерирует ответ...</i>"
+        )
         await bot.edit_message_text(
-            text=(
-                f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                "✨ <i>Gemini генерирует ответ...</i>"
-            ),
+            text=status_text,
             inline_message_id=inline_message_id,
             parse_mode="HTML",
             reply_markup=None,
@@ -1601,12 +1790,14 @@ async def _execute_inline_generation(
         limit_status = await limiter.check(user_id)
         if not limit_status.allowed:
             wait_seconds = int(limit_status.retry_after) + 1
+            err_text = (
+                f"⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
+                if is_quick
+                else f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
+            )
             try:
                 await bot.edit_message_text(
-                    text=(
-                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                        f"⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
-                    ),
+                    text=err_text,
                     inline_message_id=inline_message_id,
                     parse_mode="HTML",
                     reply_markup=None,
@@ -1630,6 +1821,12 @@ async def _execute_inline_generation(
                 clean_query = raw_query.replace(img_url, "").strip() or "Опиши подробно, что изображено на этой картинке."
                 content_input = [image_part, clean_query]
 
+        effective_prompt = (
+            (state.quick_prompt or settings.quick_prompt)
+            if is_quick
+            else state.system_prompt
+        )
+
         try:
             # Inline-запросы выполняются через глобальную очередь с учетом приоритета
             async with global_queue.acquire(user_id, priority=priority):
@@ -1637,17 +1834,19 @@ async def _execute_inline_generation(
                     model=state.model,
                     history_turns=[],
                     message=content_input,
-                    system_prompt=state.system_prompt,
+                    system_prompt=effective_prompt,
                     want_audio=False,
                 )
                 await limiter.hit(user_id)
         except GeminiError as exc:
+            err_text = (
+                f"⚠️ <i>Ошибка Gemini: {html.escape(str(exc))}</i>"
+                if is_quick
+                else f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n⚠️ <i>Ошибка Gemini: {html.escape(str(exc))}</i>"
+            )
             try:
                 await bot.edit_message_text(
-                    text=(
-                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                        f"⚠️ <i>Ошибка Gemini: {html.escape(str(exc))}</i>"
-                    ),
+                    text=err_text,
                     inline_message_id=inline_message_id,
                     parse_mode="HTML",
                     reply_markup=None,
@@ -1657,12 +1856,14 @@ async def _execute_inline_generation(
             return
         except Exception:
             logger.exception("Unexpected error in inline generation")
+            err_text = (
+                "⚠️ <i>Непредвиденная ошибка при генерации ответа.</i>"
+                if is_quick
+                else f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n⚠️ <i>Непредвиденная ошибка при генерации ответа.</i>"
+            )
             try:
                 await bot.edit_message_text(
-                    text=(
-                        f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                        "⚠️ <i>Непредвиденная ошибка при генерации ответа.</i>"
-                    ),
+                    text=err_text,
                     inline_message_id=inline_message_id,
                     parse_mode="HTML",
                     reply_markup=None,
@@ -1681,8 +1882,11 @@ async def _execute_inline_generation(
                 total_tokens=response.total_tokens,
             )
 
-    # Оформляем цитату исходного запроса в начале сообщения без указания ника
-    full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")
+    # Оформляем текст ответа (в /q без цитаты исходного запроса)
+    if is_quick:
+        full_text = response.text or "Готово."
+    else:
+        full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")
 
     if utf16_len(full_text) > INLINE_ANSWER_LIMIT:
         cut = find_utf16_cut(full_text, INLINE_ANSWER_LIMIT)
@@ -1741,7 +1945,6 @@ async def handle_inline(query: InlineQuery) -> None:
         return
 
     result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
-    _pending_inline_prompts[result_id] = (query.from_user.id, raw_query)
 
     if len(_pending_inline_prompts) > 1000:
         for k in list(_pending_inline_prompts.keys())[:200]:
@@ -1895,7 +2098,66 @@ async def handle_inline(query: InlineQuery) -> None:
             pass
         return
 
-    # Режим 2: Картинка по ссылке
+    # Режим 2: Чистый ответ без цитирования (/q или q)
+    is_q_mode = raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick "))
+    if is_q_mode:
+        parts = raw_query.split(maxsplit=1)
+        q_text = parts[1].strip() if len(parts) > 1 else ""
+        if not q_text:
+            article = InlineQueryResultArticle(
+                id="q_hint",
+                title="⚡️ Чистый ответ (/q)",
+                description="Наберите: @bot_username /q Ваш вопрос",
+                input_message_content=InputTextMessageContent(
+                    message_text="Использование чистого ответа: <code>@bot_username /q Ваш вопрос</code>",
+                    parse_mode="HTML",
+                ),
+            )
+            await query.answer(results=[article], cache_time=0, is_personal=True)
+            return
+
+        _pending_inline_prompts[result_id] = PendingInlineQuery(
+            user_id=query.from_user.id,
+            query=q_text,
+            is_quick=True,
+        )
+
+        is_image = bool(URL_REGEX.search(q_text))
+        title = "⚡️🖼 Чистый ответ по картинке (/q)" if is_image else "⚡️ Чистый ответ Gemini (/q)"
+        prompt_short = q_text[:80] + ("…" if len(q_text) > 80 else "")
+        button_text = "🖼 Анализировать картинку" if is_image else "⚡️ Получить чистый ответ"
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=button_text,
+                        callback_data=f"inline_gen:{result_id}",
+                    )
+                ]
+            ]
+        )
+
+        article = InlineQueryResultArticle(
+            id=result_id,
+            title=title,
+            description=f"«{prompt_short}» (без цитирования вопроса)",
+            reply_markup=keyboard,
+            input_message_content=InputTextMessageContent(
+                message_text="⏳ <i>Запрос отправлен. Нажмите кнопку ниже для генерации ответа:</i>",
+                parse_mode="HTML",
+            ),
+        )
+        await query.answer(results=[article], cache_time=0, is_personal=True)
+        return
+
+    # Режим 3: Картинка по ссылке или стандартный запрос к Gemini
+    _pending_inline_prompts[result_id] = PendingInlineQuery(
+        user_id=query.from_user.id,
+        query=raw_query,
+        is_quick=False,
+    )
+
     is_image = bool(URL_REGEX.search(raw_query))
     title = "🖼 Анализ картинки по ссылке" if is_image else "💬 Спросить Gemini"
     prompt_short = raw_query[:80] + ("…" if len(raw_query) > 80 else "")
@@ -1949,7 +2211,11 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
 
     entry = _pending_inline_prompts.get(chosen.result_id)
     raw_query = ""
-    if isinstance(entry, tuple):
+    is_quick = False
+    if isinstance(entry, PendingInlineQuery):
+        raw_query = entry.query
+        is_quick = entry.is_quick
+    elif isinstance(entry, tuple):
         _, raw_query = entry
     elif isinstance(entry, str):
         raw_query = entry
@@ -1968,6 +2234,7 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
             user_id=chosen.from_user.id,
             raw_query=raw_query,
             inline_message_id=chosen.inline_message_id,
+            is_quick=is_quick,
         )
     )
 
@@ -1987,7 +2254,12 @@ async def cb_inline_gen(callback: CallbackQuery) -> None:
 
     author_id = None
     raw_query = ""
-    if isinstance(entry, tuple):
+    is_quick = False
+    if isinstance(entry, PendingInlineQuery):
+        author_id = entry.user_id
+        raw_query = entry.query
+        is_quick = entry.is_quick
+    elif isinstance(entry, tuple):
         author_id, raw_query = entry
     elif isinstance(entry, str):
         raw_query = entry
@@ -2003,6 +2275,7 @@ async def cb_inline_gen(callback: CallbackQuery) -> None:
             user_id=author_id or callback.from_user.id,
             raw_query=raw_query,
             inline_message_id=callback.inline_message_id,
+            is_quick=is_quick,
         )
     )
 
@@ -2022,7 +2295,10 @@ async def cb_inline_tts(callback: CallbackQuery) -> None:
 
     author_id = None
     raw_query = ""
-    if isinstance(entry, tuple):
+    if isinstance(entry, PendingInlineQuery):
+        author_id = entry.user_id
+        raw_query = entry.query
+    elif isinstance(entry, tuple):
         author_id, raw_query = entry
     elif isinstance(entry, str):
         raw_query = entry

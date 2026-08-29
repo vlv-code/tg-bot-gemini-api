@@ -468,7 +468,7 @@ async def cmd_voice(message: Message) -> None:
     args = message.text.split(maxsplit=1) if message.text else []
     query_text = args[1].strip() if len(args) > 1 else ""
 
-    # 1. Если был реплай на фото / документ / аудио
+    # 1. Если был реплай на фото / документ / аудио / текст
     if message.reply_to_message:
         replied = message.reply_to_message
         if replied.photo:
@@ -477,10 +477,13 @@ async def cmd_voice(message: Message) -> None:
             await message.bot.download(photo.file_id, destination=file_io)
             image_part = types.Part.from_bytes(data=file_io.getvalue(), mime_type="image/jpeg")
             prompt = query_text or "Опиши подробно голосом, что изображено на этом фото."
+            caption_extra = f"\nПодпись к фото: {replied.caption}" if replied.caption else ""
+            content_input = [image_part, f"{prompt}{caption_extra}"]
+            history_text = f"[Фото из ответа] {prompt}"
             await _process_user_turn(
                 message=message,
-                content_input=[image_part, prompt],
-                history_text=f"[Фото из ответа] {prompt}",
+                content_input=content_input,
+                history_text=history_text,
                 force_voice_reply=True,
             )
             return
@@ -494,10 +497,13 @@ async def cmd_voice(message: Message) -> None:
                 mime_type=doc.mime_type or "application/octet-stream",
             )
             prompt = query_text or f"Проанализируй документ {doc.file_name or ''} и ответь голосом."
+            caption_extra = f"\nПодпись к документу: {replied.caption}" if replied.caption else ""
+            content_input = [doc_part, f"{prompt}{caption_extra}"]
+            history_text = f"[Документ из ответа: {doc.file_name or 'файл'}] {prompt}"
             await _process_user_turn(
                 message=message,
-                content_input=[doc_part, prompt],
-                history_text=f"[Документ из ответа: {doc.file_name or 'файл'}] {prompt}",
+                content_input=content_input,
+                history_text=history_text,
                 force_voice_reply=True,
             )
             return
@@ -511,10 +517,25 @@ async def cmd_voice(message: Message) -> None:
                 mime_type=media.mime_type or "audio/ogg",
             )
             prompt = query_text or "Ответь голосом на это аудиосообщение."
+            content_input = [audio_part, prompt]
+            history_text = f"[Голосовое сообщение] {prompt}"
             await _process_user_turn(
                 message=message,
-                content_input=[audio_part, prompt],
-                history_text=f"[Голосовое сообщение] {prompt}",
+                content_input=content_input,
+                history_text=history_text,
+                force_voice_reply=True,
+            )
+            return
+
+        replied_text = replied.text or replied.caption or ""
+        if replied_text:
+            prompt = query_text or "Ответь голосом на это сообщение."
+            content_input = f"Контекст цитируемого сообщения:\n\"\"\"{replied_text}\"\"\"\n\nВопрос/задача пользователя:\n{prompt}"
+            history_text = f"[Ответ на: «{replied_text[:60]}...»] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
                 force_voice_reply=True,
             )
             return
@@ -558,7 +579,7 @@ async def cmd_text(message: Message) -> None:
     args = message.text.split(maxsplit=1) if message.text else []
     query_text = args[1].strip() if len(args) > 1 else ""
 
-    # 1. Если был реплай на фото / документ / аудио
+    # 1. Если был реплай на фото / документ / аудио / текст
     if message.reply_to_message:
         replied = message.reply_to_message
         if replied.photo:
@@ -567,10 +588,13 @@ async def cmd_text(message: Message) -> None:
             await message.bot.download(photo.file_id, destination=file_io)
             image_part = types.Part.from_bytes(data=file_io.getvalue(), mime_type="image/jpeg")
             prompt = query_text or "Опиши подробно текстом, что изображено на этом фото."
+            caption_extra = f"\nПодпись к фото: {replied.caption}" if replied.caption else ""
+            content_input = [image_part, f"{prompt}{caption_extra}"]
+            history_text = f"[Фото из ответа] {prompt}"
             await _process_user_turn(
                 message=message,
-                content_input=[image_part, prompt],
-                history_text=f"[Фото из ответа] {prompt}",
+                content_input=content_input,
+                history_text=history_text,
                 force_text_only=True,
             )
             return
@@ -584,10 +608,13 @@ async def cmd_text(message: Message) -> None:
                 mime_type=doc.mime_type or "application/octet-stream",
             )
             prompt = query_text or f"Проанализируй документ {doc.file_name or ''}."
+            caption_extra = f"\nПодпись к документу: {replied.caption}" if replied.caption else ""
+            content_input = [doc_part, f"{prompt}{caption_extra}"]
+            history_text = f"[Документ из ответа: {doc.file_name or 'файл'}] {prompt}"
             await _process_user_turn(
                 message=message,
-                content_input=[doc_part, prompt],
-                history_text=f"[Документ из ответа: {doc.file_name or 'файл'}] {prompt}",
+                content_input=content_input,
+                history_text=history_text,
                 force_text_only=True,
             )
             return
@@ -601,10 +628,25 @@ async def cmd_text(message: Message) -> None:
                 mime_type=media.mime_type or "audio/ogg",
             )
             prompt = query_text or "Ответь текстом на аудиосообщение."
+            content_input = [audio_part, prompt]
+            history_text = f"[Голосовое сообщение] {prompt}"
             await _process_user_turn(
                 message=message,
-                content_input=[audio_part, prompt],
-                history_text=f"[Голосовое сообщение] {prompt}",
+                content_input=content_input,
+                history_text=history_text,
+                force_text_only=True,
+            )
+            return
+
+        replied_text = replied.text or replied.caption or ""
+        if replied_text:
+            prompt = query_text or "Ответь текстом на это сообщение."
+            content_input = f"Контекст цитируемого сообщения:\n\"\"\"{replied_text}\"\"\"\n\nВопрос/задача пользователя:\n{prompt}"
+            history_text = f"[Ответ на: «{replied_text[:60]}...»] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
                 force_text_only=True,
             )
             return
@@ -1399,7 +1441,7 @@ async def cmd_q(message: Message) -> None:
     args = message.text.split(maxsplit=1) if message.text else []
     clean_text = args[1].strip() if len(args) > 1 else ""
 
-    # 1. Если ответили командой /q на фото или документ
+    # 1. Если ответили командой /q на фото, документ, аудио или текст
     if message.reply_to_message:
         replied = message.reply_to_message
         if replied.photo:
@@ -1409,7 +1451,8 @@ async def cmd_q(message: Message) -> None:
             image_bytes = file_io.getvalue()
             image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
             prompt = clean_text or "Опиши подробно, что изображено на этой картинке."
-            content_input = [image_part, prompt]
+            caption_extra = f"\nПодпись к фото: {replied.caption}" if replied.caption else ""
+            content_input = [image_part, f"{prompt}{caption_extra}"]
             history_text = f"[Фото из ответа /q] {prompt}"
             await _process_user_turn(
                 message=message,
@@ -1420,15 +1463,16 @@ async def cmd_q(message: Message) -> None:
             )
             return
 
-        if replied.document and (replied.document.mime_type or "").startswith("image/"):
+        if replied.document:
             doc = replied.document
             file_io = io.BytesIO()
             await message.bot.download(doc.file_id, destination=file_io)
             doc_bytes = file_io.getvalue()
-            doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=doc.mime_type or "image/jpeg")
-            prompt = clean_text or "Опиши подробно, что изображено на этой картинке."
-            content_input = [doc_part, prompt]
-            history_text = f"[Изображение-документ из ответа /q] {prompt}"
+            doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=doc.mime_type or "application/octet-stream")
+            prompt = clean_text or f"Проанализируй документ {doc.file_name or ''}."
+            caption_extra = f"\nПодпись к документу: {replied.caption}" if replied.caption else ""
+            content_input = [doc_part, f"{prompt}{caption_extra}"]
+            history_text = f"[Документ из ответа /q: {doc.file_name or 'файл'}] {prompt}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,
@@ -1438,10 +1482,31 @@ async def cmd_q(message: Message) -> None:
             )
             return
 
-        if replied.text:
+        if replied.voice or replied.audio:
+            media = replied.voice or replied.audio
+            file_io = io.BytesIO()
+            await message.bot.download(media.file_id, destination=file_io)
+            audio_part = types.Part.from_bytes(
+                data=file_io.getvalue(),
+                mime_type=media.mime_type or "audio/ogg",
+            )
+            prompt = clean_text or "Ответь на это аудиосообщение."
+            content_input = [audio_part, prompt]
+            history_text = f"[Голосовое сообщение /q] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                no_quote=True,
+                use_quick_prompt=True,
+            )
+            return
+
+        replied_text = replied.text or replied.caption or ""
+        if replied_text:
             prompt = clean_text or "Ответь на это сообщение."
-            content_input = f"Контекст сообщения: {replied.text}\n\nВопрос: {prompt}"
-            history_text = f"[Цитата /q] {prompt}"
+            content_input = f"Контекст цитируемого сообщения:\n\"\"\"{replied_text}\"\"\"\n\nВопрос/задача пользователя:\n{prompt}"
+            history_text = f"[Ответ на /q: «{replied_text[:60]}...»] {prompt}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,
@@ -1496,7 +1561,7 @@ async def handle_text(message: Message) -> None:
     clean_text, force_voice, force_text = _parse_caption_voice_flags(message.text)
     clean_text = clean_text or message.text
 
-    # 1. Если пользователь ответил текстом на сообщение с фото или документом-картинкой
+    # 1. Если пользователь ответил текстом на любое сообщение (фото, документ, аудио, текст)
     if message.reply_to_message:
         replied = message.reply_to_message
         if replied.photo:
@@ -1505,8 +1570,10 @@ async def handle_text(message: Message) -> None:
             await message.bot.download(photo.file_id, destination=file_io)
             image_bytes = file_io.getvalue()
             image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-            content_input = [image_part, clean_text]
-            history_text = f"[Фото из ответа] {clean_text}"
+            prompt = clean_text or "Опиши подробно, что изображено на этом фото."
+            caption_extra = f"\nПодпись к фото: {replied.caption}" if replied.caption else ""
+            content_input = [image_part, f"{prompt}{caption_extra}"]
+            history_text = f"[Фото из ответа] {prompt}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,
@@ -1516,14 +1583,50 @@ async def handle_text(message: Message) -> None:
             )
             return
 
-        if replied.document and (replied.document.mime_type or "").startswith("image/"):
+        if replied.document:
             doc = replied.document
             file_io = io.BytesIO()
             await message.bot.download(doc.file_id, destination=file_io)
             doc_bytes = file_io.getvalue()
-            doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=doc.mime_type or "image/jpeg")
-            content_input = [doc_part, clean_text]
-            history_text = f"[Изображение-документ из ответа] {clean_text}"
+            doc_part = types.Part.from_bytes(data=doc_bytes, mime_type=doc.mime_type or "application/octet-stream")
+            prompt = clean_text or f"Проанализируй документ {doc.file_name or ''}."
+            caption_extra = f"\nПодпись к документу: {replied.caption}" if replied.caption else ""
+            content_input = [doc_part, f"{prompt}{caption_extra}"]
+            history_text = f"[Документ из ответа: {doc.file_name or 'файл'}] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                force_voice_reply=force_voice,
+                force_text_only=force_text,
+            )
+            return
+
+        if replied.voice or replied.audio:
+            media = replied.voice or replied.audio
+            file_io = io.BytesIO()
+            await message.bot.download(media.file_id, destination=file_io)
+            audio_part = types.Part.from_bytes(
+                data=file_io.getvalue(),
+                mime_type=media.mime_type or "audio/ogg",
+            )
+            prompt = clean_text or "Ответь на это аудиосообщение."
+            content_input = [audio_part, prompt]
+            history_text = f"[Голосовое сообщение] {prompt}"
+            await _process_user_turn(
+                message=message,
+                content_input=content_input,
+                history_text=history_text,
+                force_voice_reply=force_voice,
+                force_text_only=force_text,
+            )
+            return
+
+        replied_text = replied.text or replied.caption or ""
+        if replied_text:
+            prompt = clean_text or "Ответь на это сообщение."
+            content_input = f"Контекст цитируемого сообщения:\n\"\"\"{replied_text}\"\"\"\n\nВопрос/задача пользователя:\n{prompt}"
+            history_text = f"[Ответ на: «{replied_text[:60]}...»] {prompt}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,

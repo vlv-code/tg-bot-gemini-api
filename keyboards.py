@@ -160,16 +160,21 @@ def qprompt_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def personas_menu_keyboard(personas: list[dict], current_prompt: str) -> InlineKeyboardMarkup:
+def personas_menu_keyboard(
+    personas: list[dict], current_prompt: str, pinned_ids: Optional[set[str]] = None
+) -> InlineKeyboardMarkup:
     """Меню выбора Личностей Аватара."""
+    pinned = pinned_ids or set()
     buttons = []
     # Отображаем личности кнопками
     for p in personas:
         p_name = p["name"]
         p_title = p.get("title") or f"🎭 {p_name}"
         is_active = (current_prompt.strip() == p["prompt"].strip())
+        is_pinned = str(p["id"]) in pinned
         mark = "✅ " if is_active else ""
-        btn_text = f"{mark}{p_title}"
+        pin_mark = "⭐ " if is_pinned else ""
+        btn_text = f"{mark}{pin_mark}{p_title}"
         if len(btn_text) > 32:
             btn_text = btn_text[:31] + "…"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"persona_info:{p['id']}")])
@@ -185,11 +190,16 @@ def personas_menu_keyboard(personas: list[dict], current_prompt: str) -> InlineK
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def persona_view_keyboard(persona_id: str | int, is_active: bool, is_builtin: bool) -> InlineKeyboardMarkup:
+def persona_view_keyboard(
+    persona_id: str | int, is_active: bool, is_builtin: bool, is_pinned: bool = False
+) -> InlineKeyboardMarkup:
     """Клавиатура просмотра и управления конкретной личностью."""
     buttons = []
     if not is_active:
         buttons.append([InlineKeyboardButton(text="✅ Активировать эту личность", callback_data=f"persona_set:{persona_id}")])
+    
+    pin_btn_text = "⭐️ В избранном инлайна (открепить)" if is_pinned else "⭐ Закрепить в инлайн-меню"
+    buttons.append([InlineKeyboardButton(text=pin_btn_text, callback_data=f"persona_pin:{persona_id}")])
     buttons.append([InlineKeyboardButton(text="✏️ Изменить / Редактировать", callback_data=f"persona_edit:{persona_id}")])
     if not is_builtin:
         buttons.append([InlineKeyboardButton(text="❌ Удалить личность", callback_data=f"persona_del:{persona_id}")])

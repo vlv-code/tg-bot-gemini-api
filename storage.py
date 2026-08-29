@@ -211,6 +211,17 @@ class UserStorage:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_user_prompts_user_mode ON user_prompts (user_id, mode)"
             )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_pinned_personas (
+                    user_id INTEGER NOT NULL,
+                    persona_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, persona_id)
+                )
+                """
+            )
             await db.commit()
 
             self._db = db
@@ -794,6 +805,57 @@ class UserStorage:
             if str(p["id"]).lower() == ident_clean or p["name"].lower() == ident_clean:
                 return p
         return None
+
+    # --- Управление закреплёнными в инлайн-меню личностями ---
+
+    async def get_pinned_persona_ids(self, user_id: int) -> set[str]:
+        """Возвращает множество закрепленных persona_id для пользователя."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT persona_id FROM user_pinned_personas WHERE user_id = ?",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return {str(r["persona_id"]) for r in rows}
+
+    async def toggle_pinned_persona(self, user_id: int, persona_id: str | int) -> bool:
+        """Переключает статус закрепления личности. Возвращает True, если закреплена, False если откреплена."""
+        db = await self._ensure_db()
+        p_id_str = str(persona_id).strip()
+        cursor = await db.execute(
+            "SELECT 1 FROM user_pinned_personas WHERE user_id = ? AND persona_id = ?",
+            (user_id, p_id_str),
+        )
+        exists = await cursor.fetchone()
+        if exists:
+            await db.execute(
+                "DELETE FROM user_pinned_personas WHERE user_id = ? AND persona_id = ?",
+                (user_id, p_id_str),
+            )
+            await db.commit()
+            return False
+        else:
+            await db.execute(
+                "INSERT INTO user_pinned_personas (user_id, persona_id) VALUES (?, ?)",
+                (user_id, p_id_str),
+            )
+            await db.commit()
+            return True
+
+    async def is_persona_pinned(self, user_id: int, persona_id: str | int) -> bool:
+        """Проверяет, закреплена ли личность у пользователя."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT 1 FROM user_pinned_personas WHERE user_id = ? AND persona_id = ?",
+            (user_id, str(persona_id).strip()),
+        )
+        return (await cursor.fetchone()) is not None
+
+    async def get_pinned_personas(self, user_id: int) -> list[dict]:
+        """Возвращает список личностей, которые закреплены в избранное пользователем."""
+        all_personas = await self.get_all_personas(user_id)
+        pinned_ids = await self.get_pinned_persona_ids(user_id)
+        return [p for p in all_personas if str(p["id"]) in pinned_ids]
 
 
 DEFAULT_AVATAR_PERSONAS = [

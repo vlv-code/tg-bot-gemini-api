@@ -566,11 +566,12 @@ async def cmd_avatar(message: Message) -> None:
 
     if len(args) == 1:
         personas = await storage.get_all_personas(user_id)
+        pinned_ids = await storage.get_pinned_persona_ids(user_id)
         current_prompt = state.quick_prompt or settings.quick_prompt
         await message.answer(
             _render_personas_menu_text(state, personas),
             parse_mode="HTML",
-            reply_markup=personas_menu_keyboard(personas, current_prompt),
+            reply_markup=personas_menu_keyboard(personas, current_prompt, pinned_ids),
         )
         return
 
@@ -1366,12 +1367,13 @@ async def cb_menu_personas(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     state = await storage.get(callback.from_user.id, chat_id=chat_id)
     personas = await storage.get_all_personas(callback.from_user.id)
+    pinned_ids = await storage.get_pinned_persona_ids(callback.from_user.id)
     current_prompt = state.quick_prompt or settings.quick_prompt
     try:
         await callback.message.edit_text(
             _render_personas_menu_text(state, personas),
             parse_mode="HTML",
-            reply_markup=personas_menu_keyboard(personas, current_prompt),
+            reply_markup=personas_menu_keyboard(personas, current_prompt, pinned_ids),
         )
     except TelegramBadRequest:
         pass
@@ -1392,22 +1394,60 @@ async def cb_persona_info(callback: CallbackQuery) -> None:
     current_prompt = state.quick_prompt or settings.quick_prompt
     is_active = (persona["prompt"].strip() == current_prompt.strip())
     is_builtin = persona.get("is_builtin", False)
+    is_pinned = await storage.is_persona_pinned(user_id, persona["id"])
     title = persona.get("title") or f"🎭 {persona['name']}"
 
     text = (
         f"<b>{html.escape(title)}</b>\n\n"
         f"Промпт личности:\n<code>{html.escape(persona['prompt'])}</code>\n\n"
-        f"Статус: <b>{'✅ Активна' if is_active else '⚪️ Не активна'}</b>"
+        f"Статус: <b>{'✅ Активна' if is_active else '⚪️ Не активна'}</b>\n"
+        f"Инлайн-меню: <b>{'⭐ Закреплена в избранном' if is_pinned else '⚪️ Не закреплена'}</b>"
     )
     try:
         await callback.message.edit_text(
             text,
             parse_mode="HTML",
-            reply_markup=persona_view_keyboard(persona["id"], is_active, is_builtin),
+            reply_markup=persona_view_keyboard(persona["id"], is_active, is_builtin, is_pinned),
         )
     except TelegramBadRequest:
         pass
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("persona_pin:"))
+async def cb_persona_pin(callback: CallbackQuery) -> None:
+    persona_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
+    if not persona:
+        await callback.answer("Личность не найдена", show_alert=True)
+        return
+
+    is_now_pinned = await storage.toggle_pinned_persona(user_id, persona_id)
+    status_msg = "⭐ Личность закреплена в избранном инлайн-меню!" if is_now_pinned else "☆ Личность откреплена от инлайн-меню."
+    await callback.answer(status_msg, show_alert=False)
+
+    current_prompt = state.quick_prompt or settings.quick_prompt
+    is_active = (persona["prompt"].strip() == current_prompt.strip())
+    is_builtin = persona.get("is_builtin", False)
+    title = persona.get("title") or f"🎭 {persona['name']}"
+
+    text = (
+        f"<b>{html.escape(title)}</b>\n\n"
+        f"Промпт личности:\n<code>{html.escape(persona['prompt'])}</code>\n\n"
+        f"Статус: <b>{'✅ Активна' if is_active else '⚪️ Не активна'}</b>\n"
+        f"Инлайн-меню: <b>{'⭐ Закреплена в избранном' if is_now_pinned else '⚪️ Не закреплена'}</b>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=persona_view_keyboard(persona["id"], is_active, is_builtin, is_now_pinned),
+        )
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data.startswith("persona_set:"))
@@ -1426,11 +1466,12 @@ async def cb_persona_set(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get(user_id, chat_id=chat_id)
     personas = await storage.get_all_personas(user_id)
+    pinned_ids = await storage.get_pinned_persona_ids(user_id)
     try:
         await callback.message.edit_text(
             _render_personas_menu_text(state, personas),
             parse_mode="HTML",
-            reply_markup=personas_menu_keyboard(personas, persona["prompt"]),
+            reply_markup=personas_menu_keyboard(personas, persona["prompt"], pinned_ids),
         )
     except TelegramBadRequest:
         pass
@@ -1454,12 +1495,13 @@ async def cb_persona_del(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get(user_id, chat_id=chat_id)
     personas = await storage.get_all_personas(user_id)
+    pinned_ids = await storage.get_pinned_persona_ids(user_id)
     current_prompt = state.quick_prompt or settings.quick_prompt
     try:
         await callback.message.edit_text(
             _render_personas_menu_text(state, personas),
             parse_mode="HTML",
-            reply_markup=personas_menu_keyboard(personas, current_prompt),
+            reply_markup=personas_menu_keyboard(personas, current_prompt, pinned_ids),
         )
     except TelegramBadRequest:
         pass
@@ -2957,9 +2999,10 @@ async def handle_inline(query: InlineQuery) -> None:
         ),
     )
 
-    # 4. Селектор личностей внутри Аватара
-    persona_articles = []
-    for p in personas:
+    # 4. Закреплённые пользователем в избранное личности Аватара (ниже основных трёх)
+    pinned_personas = await storage.get_pinned_personas(user_id)
+    pinned_articles = []
+    for p in pinned_personas:
         if str(p["id"]) == str(active_p_id):
             continue
         p_title = p.get("title") or f"🎭 {p['name']}"
@@ -2974,10 +3017,10 @@ async def handle_inline(query: InlineQuery) -> None:
             is_quick=True,
             interactive=True,
         )
-        persona_articles.append(
+        pinned_articles.append(
             InlineQueryResultArticle(
                 id=p_sid,
-                title=f"🎭 Avatar: {p_title}",
+                title=f"⭐ Avatar: {p_title}",
                 description=f"«{prompt_short}» • Стиль: {p_title}",
                 input_message_content=InputTextMessageContent(
                     message_text=f"⏳ <i>Генерирую сообщение в стиле «{p_title}»...</i>",
@@ -2989,20 +3032,21 @@ async def handle_inline(query: InlineQuery) -> None:
             )
         )
 
-    # Формируем порядок выдачи:
+    # 3 основные карточки всегда сверху: Stand, Avatar Быстро, Avatar Предпросмотр
+    # Ниже — только закреплённые в избранное личности пользователя
     if intent == "avatar":
-        results = [fast_article, prev_article] + persona_articles + [stand_article]
+        results = [fast_article, prev_article, stand_article] + pinned_articles
     elif intent == "stand":
-        results = [stand_article, fast_article, prev_article] + persona_articles
+        results = [stand_article, fast_article, prev_article] + pinned_articles
     else:
-        results = [stand_article, fast_article, prev_article] + persona_articles
+        results = [stand_article, fast_article, prev_article] + pinned_articles
 
     await query.answer(
         results=results,
         cache_time=0,
         is_personal=True,
         button=InlineQueryResultsButton(
-            text="🎭 Каталог Личностей Аватара",
+            text="🎭 Личности Аватара",
             start_parameter="avatars",
         ),
     )

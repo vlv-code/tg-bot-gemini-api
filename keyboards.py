@@ -170,10 +170,21 @@ def persona_view_keyboard(persona_id: str | int, is_active: bool, is_builtin: bo
     buttons = []
     if not is_active:
         buttons.append([InlineKeyboardButton(text="✅ Активировать эту личность", callback_data=f"persona_set:{persona_id}")])
+    buttons.append([InlineKeyboardButton(text="✏️ Изменить / Редактировать", callback_data=f"persona_edit:{persona_id}")])
     if not is_builtin:
         buttons.append([InlineKeyboardButton(text="❌ Удалить личность", callback_data=f"persona_del:{persona_id}")])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад к списку личностей", callback_data="menu:personas")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад к личностям", callback_data="menu:personas")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def persona_edit_keyboard(persona_id: str | int) -> InlineKeyboardMarkup:
+    """Клавиатура возврата из режима редактирования личности."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад к описанию личности", callback_data=f"persona_info:{persona_id}")],
+            [InlineKeyboardButton(text="🎭 К списку личностей", callback_data="menu:personas")],
+        ]
+    )
 
 
 def stand_prompts_menu_keyboard(presets: list[dict], current_prompt: str) -> InlineKeyboardMarkup:
@@ -202,10 +213,21 @@ def stand_prompt_view_keyboard(preset_id: str | int, is_active: bool, is_builtin
     buttons = []
     if not is_active:
         buttons.append([InlineKeyboardButton(text="✅ Активировать этот промпт", callback_data=f"stand_set:{preset_id}")])
+    buttons.append([InlineKeyboardButton(text="✏️ Изменить / Редактировать", callback_data=f"stand_edit:{preset_id}")])
     if not is_builtin:
         buttons.append([InlineKeyboardButton(text="❌ Удалить промпт", callback_data=f"stand_del:{preset_id}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад к списку промптов", callback_data="menu:prompts")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def stand_prompt_edit_keyboard(preset_id: str | int) -> InlineKeyboardMarkup:
+    """Клавиатура возврата из режима редактирования Stand-промпта."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад к описанию промпта", callback_data=f"stand_info:{preset_id}")],
+            [InlineKeyboardButton(text="🥊 К каталогу промптов", callback_data="menu:prompts")],
+        ]
+    )
 
 
 def limits_keyboard() -> InlineKeyboardMarkup:

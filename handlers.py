@@ -39,11 +39,13 @@ from keyboards import (
     limits_keyboard,
     main_menu_keyboard,
     models_keyboard,
+    persona_edit_keyboard,
     persona_view_keyboard,
     personas_menu_keyboard,
     prompt_keyboard,
     qprompt_keyboard,
     settings_keyboard,
+    stand_prompt_edit_keyboard,
     stand_prompt_view_keyboard,
     stand_prompts_menu_keyboard,
     tts_menu_keyboard,
@@ -192,9 +194,9 @@ def _render_prompt_menu_text(state: UserState) -> str:
     return (
         f"🥊 <b>Системный промпт (Stand-режим)</b>{status}:\n\n"
         f"<code>{html.escape(effective)}</code>\n\n"
-        "• Чтобы выбрать готовый пресет или сохранить свой: нажмите <b>«📚 Каталог промптов Stand»</b>\n"
+        "• Чтобы выбрать готовый пресет или изменить свой: нажмите <b>«📚 Каталог промптов Stand»</b>\n"
+        "• Чтобы сохранить/изменить промпт: <code>/prompt edit Имя = Текст</code>\n"
         "• Чтобы задать произвольный текст: <code>/prompt текст промпта</code>\n"
-        "• Чтобы сохранить именованный: <code>/prompt add Имя = Текст</code>\n"
         "• Чтобы сбросить к дефолту: <code>/prompt reset</code>"
     )
 
@@ -211,8 +213,8 @@ def _render_qprompt_menu_text(state: UserState) -> str:
     return (
         f"🎭 <b>Системный промпт (Режим Аватара /q)</b>{status}:\n\n"
         f"<code>{html.escape(effective)}</code>\n\n"
-        "• Чтобы выбрать личность (Бро, Бизнес, Сарказм...): нажмите <b>«🎭 Личности Аватара»</b>\n"
-        "• Чтобы сохранить новую личность: <code>/persona add Имя = Текст</code>\n"
+        "• Чтобы выбрать или изменить личность: нажмите <b>«🎭 Личности Аватара»</b>\n"
+        "• Чтобы создать/изменить личность: <code>/avatar edit Имя = Текст</code>\n"
         "• Чтобы сбросить к дефолту: <code>/qprompt reset</code>"
     )
 
@@ -230,10 +232,10 @@ def _render_personas_menu_text(state: UserState, personas: list[dict]) -> str:
         f"Активная личность: <b>{html.escape(active_name)}</b>\n\n"
         f"Текущий системный промпт:\n<code>{html.escape(current_prompt[:250])}{'…' if len(current_prompt) > 250 else ''}</code>\n\n"
         "<b>Управление личностями:</b>\n"
-        "• <i>Выбор:</i> Нажмите на нужную личность в списке ниже\n"
-        "• <i>Создать свою:</i> <code>/persona add Имя = Текст</code>\n"
-        "• <i>Переключить по имени:</i> <code>/persona Имя</code>\n"
-        "• <i>Удалить свою:</i> <code>/persona del Имя</code>"
+        "• <i>Выбор/Редактирование:</i> Нажмите на нужную личность в списке ниже\n"
+        "• <i>Создать/Изменить:</i> <code>/avatar edit Имя = Текст</code>\n"
+        "• <i>Переключить по имени:</i> <code>/avatar Имя</code>\n"
+        "• <i>Удалить свою:</i> <code>/avatar del Имя</code>"
     )
 
 
@@ -250,8 +252,8 @@ def _render_stand_prompts_menu_text(state: UserState, presets: list[dict]) -> st
         f"Активная роль: <b>{html.escape(active_name)}</b>\n\n"
         f"Текущий системный промпт:\n<code>{html.escape(current_prompt[:250])}{'…' if len(current_prompt) > 250 else ''}</code>\n\n"
         "<b>Управление промптами:</b>\n"
-        "• <i>Выбор:</i> Нажмите на пресет в списке ниже\n"
-        "• <i>Создать свой:</i> <code>/prompt add Имя = Текст</code>\n"
+        "• <i>Выбор/Редактирование:</i> Нажмите на пресет в списке ниже\n"
+        "• <i>Создать/Изменить:</i> <code>/prompt edit Имя = Текст</code>\n"
         "• <i>Активировать по имени:</i> <code>/prompt Имя</code>\n"
         "• <i>Задать произвольный:</i> <code>/prompt текст</code>\n"
         "• <i>Удалить свой:</i> <code>/prompt del Имя</code>"
@@ -448,17 +450,20 @@ async def cmd_prompt(message: Message) -> None:
         await message.answer("Системный промпт Stand сброшен к значению по умолчанию ✅")
         return
 
-    # Проверяем синтаксис добавления: /prompt add Имя = Текст или /prompt save Имя = Текст
-    if raw_arg.lower().startswith(("add ", "save ", "добавить ", "сохранить ")):
-        sub = raw_arg.split(maxsplit=1)[1].strip()
-        if "=" in sub:
-            p_name, p_text = sub.split("=", 1)
-            p_name, p_text = p_name.strip(), p_text.strip()
-            if p_name and p_text:
-                await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="main")
-                await storage.set_system_prompt(user_id, p_text)
-                await message.answer(f"Промпт <b>«{html.escape(p_name)}»</b> сохранён и активирован! ✅", parse_mode="HTML")
-                return
+    # Создание или редактирование: /prompt edit Имя = Текст или /prompt Имя = Текст
+    if "=" in raw_arg:
+        left, p_text = raw_arg.split("=", 1)
+        p_name = left.strip()
+        for prefix in ("add ", "save ", "edit ", "изменить ", "сохранить ", "добавить ", "ред "):
+            if p_name.lower().startswith(prefix):
+                p_name = p_name[len(prefix):].strip()
+                break
+        p_text = p_text.strip()
+        if p_name and p_text:
+            await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="main")
+            await storage.set_system_prompt(user_id, p_text)
+            await message.answer(f"Stand-промпт <b>«{html.escape(p_name)}»</b> сохранён и активирован! 🥊", parse_mode="HTML")
+            return
 
     # Проверяем удаление: /prompt del Имя или /prompt delete Имя
     if raw_arg.lower().startswith(("del ", "delete ", "rm ", "удалить ")):
@@ -483,8 +488,8 @@ async def cmd_prompt(message: Message) -> None:
     await message.answer("Индивидуальный system prompt сохранён в базе данных ✅")
 
 
-@router.message(Command("persona", "personas", "личность", "личности"))
-async def cmd_personas(message: Message) -> None:
+@router.message(Command("avatar", "avatars", "persona", "personas", "личность", "личности", "аватар", "аватары"))
+async def cmd_avatar(message: Message) -> None:
     """Управление Личностями Аватара (/q)."""
     user_id = message.from_user.id
     state = await storage.get(user_id, chat_id=message.chat.id)
@@ -506,19 +511,22 @@ async def cmd_personas(message: Message) -> None:
         await message.answer("Личность Аватара сброшена к дефолтному суфлёру ✅")
         return
 
-    # Создание личности: /persona add Имя = Текст
-    if raw_arg.lower().startswith(("add ", "save ", "добавить ", "сохранить ")):
-        sub = raw_arg.split(maxsplit=1)[1].strip()
-        if "=" in sub:
-            p_name, p_text = sub.split("=", 1)
-            p_name, p_text = p_name.strip(), p_text.strip()
-            if p_name and p_text:
-                await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
-                await storage.set_quick_prompt(user_id, p_text)
-                await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
-                return
+    # Создание или редактирование: /avatar edit Имя = Текст или /avatar Имя = Текст
+    if "=" in raw_arg:
+        left, p_text = raw_arg.split("=", 1)
+        p_name = left.strip()
+        for prefix in ("add ", "save ", "edit ", "изменить ", "сохранить ", "добавить ", "ред "):
+            if p_name.lower().startswith(prefix):
+                p_name = p_name[len(prefix):].strip()
+                break
+        p_text = p_text.strip()
+        if p_name and p_text:
+            await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
+            await storage.set_quick_prompt(user_id, p_text)
+            await message.answer(f"Личность Аватара <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
+            return
 
-    # Удаление личности: /persona del Имя
+    # Удаление личности: /avatar del Имя
     if raw_arg.lower().startswith(("del ", "delete ", "rm ", "удалить ")):
         p_name = raw_arg.split(maxsplit=1)[1].strip()
         deleted = await storage.delete_user_prompt_by_name(user_id, name=p_name, mode="quick")
@@ -560,17 +568,20 @@ async def cmd_qprompt(message: Message) -> None:
         await message.answer("Системный промпт для режима /q сброшен к значению по умолчанию ✅")
         return
 
-    # Если пользователь ввёл команду вида /qprompt add Имя = Текст
-    if raw_arg.lower().startswith(("add ", "save ", "добавить ", "сохранить ")):
-        sub = raw_arg.split(maxsplit=1)[1].strip()
-        if "=" in sub:
-            p_name, p_text = sub.split("=", 1)
-            p_name, p_text = p_name.strip(), p_text.strip()
-            if p_name and p_text:
-                await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
-                await storage.set_quick_prompt(user_id, p_text)
-                await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
-                return
+    # Если пользователь ввёл команду вида /qprompt edit Имя = Текст или /qprompt Имя = Текст
+    if "=" in raw_arg:
+        left, p_text = raw_arg.split("=", 1)
+        p_name = left.strip()
+        for prefix in ("add ", "save ", "edit ", "изменить ", "сохранить ", "добавить ", "ред "):
+            if p_name.lower().startswith(prefix):
+                p_name = p_name[len(prefix):].strip()
+                break
+        p_text = p_text.strip()
+        if p_name and p_text:
+            await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
+            await storage.set_quick_prompt(user_id, p_text)
+            await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
+            return
 
     matched = await storage.find_persona_by_name_or_id(user_id, raw_arg)
     if matched:
@@ -1372,10 +1383,38 @@ async def cb_persona_del(callback: CallbackQuery) -> None:
         pass
 
 
+@router.callback_query(F.data.startswith("persona_edit:"))
+async def cb_persona_edit(callback: CallbackQuery) -> None:
+    persona_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
+    if not persona:
+        await callback.answer("Личность не найдена", show_alert=True)
+        return
+
+    p_name = persona["name"]
+    p_prompt = persona["prompt"]
+    text = (
+        f"✏️ <b>Редактирование личности «{html.escape(p_name)}»</b>:\n\n"
+        "Скопируйте команду ниже (нажмите на неё), измените текст и отправьте боту в этот чат:\n\n"
+        f"<code>/avatar edit {html.escape(p_name)} = {html.escape(p_prompt)}</code>\n\n"
+        "<i>После отправки команды личность обновится в базе данных и сразу станет активной.</i>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=persona_edit_keyboard(persona["id"]),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
 @router.callback_query(F.data == "persona:add_hint")
 async def cb_persona_add_hint(callback: CallbackQuery) -> None:
     await callback.answer(
-        "Чтобы создать личность, отправьте команду:\n/persona add Имя = Описание стиля",
+        "Чтобы создать личность, отправьте команду:\n/avatar add Имя = Описание стиля",
         show_alert=True,
     )
 
@@ -1455,6 +1494,34 @@ async def cb_stand_set(callback: CallbackQuery) -> None:
         pass
 
 
+@router.callback_query(F.data.startswith("stand_edit:"))
+async def cb_stand_edit(callback: CallbackQuery) -> None:
+    preset_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    preset = await storage.find_stand_preset_by_name_or_id(user_id, preset_id)
+    if not preset:
+        await callback.answer("Промпт не найден", show_alert=True)
+        return
+
+    p_name = preset["name"]
+    p_prompt = preset["prompt"]
+    text = (
+        f"✏️ <b>Редактирование Stand-промпта «{html.escape(p_name)}»</b>:\n\n"
+        "Скопируйте команду ниже (нажмите на неё), измените текст и отправьте боту в этот чат:\n\n"
+        f"<code>/prompt edit {html.escape(p_name)} = {html.escape(p_prompt)}</code>\n\n"
+        "<i>После отправки команды промпт обновится в базе данных и сразу станет активным.</i>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=stand_prompt_edit_keyboard(preset["id"]),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("stand_del:"))
 async def cb_stand_del(callback: CallbackQuery) -> None:
     preset_id = callback.data.split(":", 1)[1]
@@ -1462,6 +1529,26 @@ async def cb_stand_del(callback: CallbackQuery) -> None:
     try:
         p_id_int = int(preset_id)
         deleted = await storage.delete_user_prompt(user_id, p_id_int)
+    except ValueError:
+        deleted = False
+
+    if deleted:
+        await callback.answer("Промпт удален ✅")
+    else:
+        await callback.answer("Не удалось удалить промпт ❌", show_alert=True)
+
+    chat_id = callback.message.chat.id if callback.message else user_id
+    state = await storage.get(user_id, chat_id=chat_id)
+    presets = await storage.get_all_stand_presets(user_id)
+    current_prompt = state.system_prompt or settings.system_prompt or ""
+    try:
+        await callback.message.edit_text(
+            _render_stand_prompts_menu_text(state, presets),
+            parse_mode="HTML",
+            reply_markup=stand_prompts_menu_keyboard(presets, current_prompt),
+        )
+    except TelegramBadRequest:
+        pass
     except ValueError:
         deleted = False
 

@@ -96,7 +96,8 @@ class GeminiClient:
 
         is_audio_model = "tts" in model.lower() or "audio" in model.lower()
         if want_audio and is_audio_model:
-            config_kwargs["response_modalities"] = ["AUDIO", "TEXT"]
+            modalities = ["AUDIO"] if "preview-tts" in model.lower() else ["AUDIO", "TEXT"]
+            config_kwargs["response_modalities"] = modalities
             config_kwargs["speech_config"] = types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -190,8 +191,9 @@ class GeminiClient:
 
         last_error = None
         for target_model in models_to_try:
+            modalities = ["AUDIO"] if "tts" in target_model.lower() else ["AUDIO", "TEXT"]
             config = types.GenerateContentConfig(
-                response_modalities=["AUDIO", "TEXT"],
+                response_modalities=modalities,
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(

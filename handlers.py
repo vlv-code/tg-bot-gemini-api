@@ -1,11 +1,12 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import html
 import io
 import ipaddress
 import logging
 import re
+import time
 from typing import Optional, Sequence, Union
 import urllib.parse
 
@@ -22,6 +23,7 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedVoice,
+    InlineQueryResultsButton,
     InputTextMessageContent,
     Message,
 )
@@ -37,6 +39,7 @@ from keyboards import (
     admin_users_keyboard,
     clear_history_chats_keyboard,
     info_menu_keyboard,
+    inline_control_keyboard,
     limits_keyboard,
     main_menu_keyboard,
     models_keyboard,
@@ -2401,141 +2404,90 @@ INLINE_ANSWER_LIMIT = 3900
 
 
 @dataclass
-class PendingInlineQuery:
+class InlineSession:
+    session_id: str
     user_id: int
     query: str
+    persona_id: Optional[Union[str, int]] = None
+    persona_name: str = "Дефолтный суфлёр"
+    persona_prompt: str = ""
     is_quick: bool = False
+    interactive: bool = False
+    created_at: float = field(default_factory=time.time)
 
 
-# Временный кэш промптов (result_id -> PendingInlineQuery) для inline-генерации
-_pending_inline_prompts: dict[str, PendingInlineQuery] = {}
+# Временный кэш сессий для инлайн-генерации и инлайн-кнопок (session_id -> InlineSession)
+_inline_sessions: dict[str, InlineSession] = {}
 # Активные задачи debounce для инлайн TTS (user_id -> query_token)
 _active_inline_tts_tasks: dict[int, str] = {}
 
 
-async def _execute_inline_tts_generation(
-    bot: Bot,
-    user_id: int,
-    tts_text: str,
-    inline_message_id: str,
-) -> None:
-    """Генерирует озвучку текста и отправляет голосовое сообщение в ЛС пользователю."""
-    async with user_locks.get(user_id):
-        limit_status = await limiter.check(user_id)
-        if not limit_status.allowed:
-            wait_seconds = int(limit_status.retry_after) + 1
-            try:
-                await bot.edit_message_text(
-                    text=(
-                        f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
-                        f"⏳ <i>Лимит запросов исчерпан. Попробуйте снова через {wait_seconds} сек.</i>"
-                    ),
-                    inline_message_id=inline_message_id,
-                    parse_mode="HTML",
-                    reply_markup=None,
-                )
-            except TelegramBadRequest:
-                pass
-            return
+def _cleanup_inline_sessions() -> None:
+    now = time.time()
+    expired = [sid for sid, s in _inline_sessions.items() if now - s.created_at > 7200]
+    for sid in expired:
+        _inline_sessions.pop(sid, None)
+    if len(_inline_sessions) > 2000:
+        for sid in list(_inline_sessions.keys())[:500]:
+            _inline_sessions.pop(sid, None)
 
-        state = await storage.get_settings(user_id)
-        priority = await _get_user_priority(user_id)
 
-        try:
-            async with global_queue.acquire(user_id, priority=priority):
-                audio_bytes = await gemini_client.generate_speech(
-                    text=tts_text,
-                    voice_name=state.tts_voice,
-                    model=state.tts_model,
-                )
-                await limiter.hit(user_id)
-        except GeminiError as exc:
-            try:
-                await bot.edit_message_text(
-                    text=(
-                        f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
-                        f"⚠️ <i>Ошибка генерации речи: {html.escape(str(exc))}</i>"
-                    ),
-                    inline_message_id=inline_message_id,
-                    parse_mode="HTML",
-                    reply_markup=None,
-                )
-            except TelegramBadRequest:
-                pass
-            return
-        except Exception:
-            logger.exception("Unexpected error in inline TTS generation")
-            try:
-                await bot.edit_message_text(
-                    text=(
-                        f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
-                        "⚠️ <i>Непредвиденная ошибка при генерации речи.</i>"
-                    ),
-                    inline_message_id=inline_message_id,
-                    parse_mode="HTML",
-                    reply_markup=None,
-                )
-            except TelegramBadRequest:
-                pass
-            return
+def _parse_persona_prefix(raw_query: str, personas: list[dict]) -> tuple[str, Optional[dict], bool]:
+    """
+    Определяет, указал ли пользователь префикс стиля (например: /kawaii ..., bro: ..., /biz ...).
+    Возвращает (очищенный_запрос, выбранная_персона, явный_ли_запрос_аватара).
+    """
+    clean_q = raw_query.strip()
+    is_explicit_q = False
 
-    audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
-    bot_info = await bot.get_me()
-    bot_username = bot_info.username or ""
+    for prefix in ("/q ", "q ", "/quick ", "quick ", "/avatar ", "avatar "):
+        if clean_q.lower().startswith(prefix):
+            clean_q = clean_q[len(prefix):].strip()
+            is_explicit_q = True
+            break
 
-    pm_status = "✅ <i>Голосовое сообщение сгенерировано и отправлено в личку с ботом!</i>"
-    try:
-        voice_file = BufferedInputFile(audio_data, filename=audio_filename)
-        await bot.send_voice(
-            chat_id=user_id,
-            voice=voice_file,
-            caption=f"🎙 Озвучка из инлайн-режима:\n{tts_text[:200]}",
-        )
-    except Exception:
-        pm_status = (
-            "✅ <i>Озвучка готова! Чтобы бот мог присылать аудиофайлы в личку, "
-            "откройте диалог с ботом по кнопке ниже.</i>"
-        )
+    for p in personas:
+        p_name = p["name"].lower()
+        p_id = str(p["id"]).lower()
+        candidates = [
+            f"/{p_name} ", f"/{p_id} ",
+            f"{p_name}: ", f"{p_id}: ",
+            f"{p_name} ",
+        ]
+        for c in candidates:
+            if clean_q.lower().startswith(c):
+                clean_q = clean_q[len(c):].strip()
+                return clean_q, p, True
 
-    keyboard = None
-    if bot_username:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🎧 Открыть голосовое в боте",
-                        url=f"https://t.me/{bot_username}",
-                    )
-                ]
-            ]
-        )
-
-    try:
-        await bot.edit_message_text(
-            text=(
-                f"🎙 <b>Озвучка текста (TTS):</b>\n"
-                f"<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
-                f"{pm_status}"
-            ),
-            inline_message_id=inline_message_id,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
-    except TelegramBadRequest:
-        pass
+    return clean_q, None, is_explicit_q
 
 
 async def _execute_inline_generation(
     bot: Bot,
     user_id: int,
-    raw_query: str,
+    session_id: str,
     inline_message_id: str,
-    is_quick: bool = False,
+    raw_query_override: Optional[str] = None,
+    temperature_jitter: bool = False,
 ) -> None:
-    """Генерирует ответ Gemini (текст или анализ картинки по ссылке) и редактирует инлайн-сообщение."""
+    """Генерирует ответ Gemini (текст или анализ картинки по ссылке) и обновляет инлайн-сообщение."""
+    session = _inline_sessions.get(session_id)
+    if session:
+        raw_query = raw_query_override or session.query
+        is_quick = session.is_quick
+        interactive = session.interactive
+        persona_prompt = session.persona_prompt
+        persona_name = session.persona_name
+    else:
+        raw_query = raw_query_override or ""
+        is_quick = True
+        interactive = False
+        persona_prompt = ""
+        persona_name = "Аватар"
+
     try:
         status_text = (
-            "✨ <i>Gemini генерирует ответ...</i>"
+            f"✨ <i>Генерирую сообщение в стиле «{html.escape(persona_name)}»...</i>"
             if is_quick
             else f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n✨ <i>Gemini генерирует ответ...</i>"
         )
@@ -2543,7 +2495,7 @@ async def _execute_inline_generation(
             text=status_text,
             inline_message_id=inline_message_id,
             parse_mode="HTML",
-            reply_markup=None,
+            reply_markup=inline_control_keyboard(session_id) if interactive else None,
         )
     except TelegramBadRequest:
         pass
@@ -2601,7 +2553,7 @@ async def _execute_inline_generation(
             )
 
         effective_prompt = (
-            _build_avatar_effective_prompt(state.quick_prompt or settings.quick_prompt)
+            _build_avatar_effective_prompt(persona_prompt or state.quick_prompt or settings.quick_prompt)
             if is_quick
             else state.system_prompt
         )
@@ -2661,9 +2613,9 @@ async def _execute_inline_generation(
                 total_tokens=response.total_tokens,
             )
 
-    # Оформляем текст ответа (в /q без цитаты исходного запроса)
+    # Оформляем текст ответа
     if is_quick:
-        full_text = response.text or "Готово."
+        full_text = (response.text or "Готово.").strip()
     else:
         full_text = _format_with_prompt_quote(raw_query, response.text or "Готово.")
 
@@ -2673,7 +2625,9 @@ async def _execute_inline_generation(
             full_text[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше задавать в личку боту)"
         )
 
-    if state.rich_mode:
+    markup = inline_control_keyboard(session_id) if interactive else None
+
+    if state.rich_mode and not interactive:
         chunks = markdown_to_chunks(full_text, max_len=INLINE_ANSWER_LIMIT)
         if chunks:
             chunk_text, chunk_entities = chunks[0]
@@ -2682,7 +2636,7 @@ async def _execute_inline_generation(
                     text=chunk_text,
                     entities=chunk_entities,
                     inline_message_id=inline_message_id,
-                    reply_markup=None,
+                    reply_markup=markup,
                 )
                 return
             except TelegramBadRequest:
@@ -2692,7 +2646,8 @@ async def _execute_inline_generation(
         await bot.edit_message_text(
             text=full_text,
             inline_message_id=inline_message_id,
-            reply_markup=None,
+            parse_mode="HTML",
+            reply_markup=markup,
         )
     except TelegramBadRequest:
         pass
@@ -2701,17 +2656,23 @@ async def _execute_inline_generation(
 @router.inline_query()
 async def handle_inline(query: InlineQuery) -> None:
     raw_query = query.query.strip()
+    user_id = query.from_user.id
+    _cleanup_inline_sessions()
+
     if not raw_query:
         help_article = InlineQueryResultArticle(
             id="inline_help",
             title="💬 Введите запрос для Gemini...",
-            description="Появятся 2 варианта: 🥊 Отправить Stand или 🎭 Отправить Avatar",
+            description="⚡️ Быстрый режим • 👁 Предпросмотр с кнопками • 🎭 Выбор Личностей",
             input_message_content=InputTextMessageContent(
                 message_text=(
-                    "Чтобы обратиться к Gemini в любом чате, наберите:\n"
-                    "• <code>@bot_username ваш вопрос</code> (выберите <b>🥊 Stand</b> или <b>🎭 Avatar</b>)\n"
-                    "• <code>@bot_username /tts текст</code> (голосовое сообщение)\n"
-                    "• <code>@bot_username https://ссылка_на_картинку вопрос</code>"
+                    "🌟 <b>Использование бота в инлайн-режиме:</b>\n\n"
+                    "• <code>@bot_username ваш текст</code> — быстрый выбор вариантов отправки\n"
+                    "• <code>@bot_username /kawaii текст</code> — ответ в стиле Kawaii\n"
+                    "• <code>@bot_username /bro текст</code> — ответ в стиле Бро\n"
+                    "• <code>@bot_username /tts текст</code> — голосовая озвучка (TTS)\n"
+                    "• <code>@bot_username https://картинка вопрос</code> — анализ изображения\n\n"
+                    "💡 <i>В выпадающем меню доступны карточки «⚡️ Быстро» (без кнопок) и «👁 Предпросмотр» (с кнопками перегенерации и смены стиля прямо в чате).</i>"
                 ),
                 parse_mode="HTML",
             ),
@@ -2720,12 +2681,12 @@ async def handle_inline(query: InlineQuery) -> None:
             results=[help_article],
             cache_time=0,
             is_personal=True,
+            button=InlineQueryResultsButton(
+                text="🎭 Каталог Личностей Аватара",
+                start_parameter="avatars",
+            ),
         )
         return
-
-    if len(_pending_inline_prompts) > 1000:
-        for k in list(_pending_inline_prompts.keys())[:200]:
-            _pending_inline_prompts.pop(k, None)
 
     # Режим 1: Озвучка текста (/tts или tts) -> нативное голосовое сообщение в чат
     if raw_query.lower().startswith(("/tts", "tts")):
@@ -2745,8 +2706,7 @@ async def handle_inline(query: InlineQuery) -> None:
             return
 
         result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
-        user_id = query.from_user.id
-        state = await storage.get_settings(user_id)
+        state = await storage.get(user_id)
 
         # 1. Проверяем постоянный кэш в SQLite (0 мс, 0 квоты)
         cached_file_id = await storage.get_cached_tts_voice(
@@ -2876,72 +2836,153 @@ async def handle_inline(query: InlineQuery) -> None:
             pass
         return
 
-    # Режимы Stand и Avatar: предлагаем пользователю оба варианта на выбор
-    is_explicit_q = raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick "))
-    clean_query = raw_query.split(maxsplit=1)[1].strip() if is_explicit_q else raw_query
+    # Режимы Avatar и Stand
+    state = await storage.get(user_id)
+    personas = await storage.get_all_personas(user_id)
 
-    query_hash = hashlib.sha256(clean_query.encode("utf-8")).hexdigest()[:20]
-    stand_id = f"stand_{query_hash}"
-    avatar_id = f"avatar_{query_hash}"
+    clean_query, matched_persona, is_explicit_avatar = _parse_persona_prefix(raw_query, personas)
+    if not clean_query:
+        clean_query = raw_query
 
-    _pending_inline_prompts[stand_id] = PendingInlineQuery(
-        user_id=query.from_user.id,
+    # Определяем активную личность
+    if matched_persona:
+        active_p_id = matched_persona["id"]
+        active_p_name = matched_persona.get("title") or matched_persona["name"]
+        active_p_prompt = matched_persona["prompt"]
+    else:
+        active_p_name = "Дефолтный суфлёр"
+        active_p_id = "default"
+        active_p_prompt = state.quick_prompt or settings.quick_prompt
+        for p in personas:
+            if p["prompt"].strip() == active_p_prompt.strip():
+                active_p_name = p.get("title") or p["name"]
+                active_p_id = p["id"]
+                break
+
+    query_hash = hashlib.sha256(f"{clean_query}:{time.time()}".encode("utf-8")).hexdigest()[:16]
+    prompt_short = clean_query[:65] + ("…" if len(clean_query) > 65 else "")
+
+    results = []
+
+    # Карточка 1: ⚡️ Быстро: Avatar (отправить сразу не глядя без кнопок)
+    fast_sid = f"fast_{query_hash}"
+    _inline_sessions[fast_sid] = InlineSession(
+        session_id=fast_sid,
+        user_id=user_id,
         query=clean_query,
-        is_quick=False,
-    )
-    _pending_inline_prompts[avatar_id] = PendingInlineQuery(
-        user_id=query.from_user.id,
-        query=clean_query,
+        persona_id=active_p_id,
+        persona_name=active_p_name,
+        persona_prompt=active_p_prompt,
         is_quick=True,
+        interactive=False,
     )
-
-    is_image = bool(URL_REGEX.search(clean_query))
-    prompt_short = clean_query[:70] + ("…" if len(clean_query) > 70 else "")
-
-    # Карточка 1: Stand-режим (ответ ИИ-помощника с цитатой)
-    stand_title = "🖼 Stand: Анализ картинки" if is_image else "🥊 Отправить Stand (ИИ-стенд)"
-    stand_desc = f"«{prompt_short}» (ответ ИИ с цитатой)"
-    stand_btn = "🖼 Анализировать картинку" if is_image else "🥊 Получить ответ Stand"
-    stand_article = InlineQueryResultArticle(
-        id=stand_id,
-        title=stand_title,
-        description=stand_desc,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text=stand_btn, callback_data=f"inline_gen:{stand_id}")]]
-        ),
-        input_message_content=InputTextMessageContent(
-            message_text=(
-                f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(clean_query)}</blockquote>\n\n"
-                "⏳ <i>Запрос отправлен в Stand-режиме. Генерирую ответ...</i>"
+    results.append(
+        InlineQueryResultArticle(
+            id=fast_sid,
+            title=f"⚡️ Быстро: Avatar ({active_p_name})",
+            description=f"«{prompt_short}» • Отправить сразу без кнопок",
+            input_message_content=InputTextMessageContent(
+                message_text="⏳ <i>Генерирую сообщение от вашего лица...</i>",
+                parse_mode="HTML",
             ),
-            parse_mode="HTML",
-        ),
+        )
     )
 
-    # Карточка 2: Режим Аватара (чистый ответ от 1-го лица за пользователя)
-    avatar_title = "🎭🖼 Avatar: Анализ картинки" if is_image else "🎭 Отправить Avatar (от 1-го лица)"
-    avatar_desc = f"«{prompt_short}» (чистый ответ за вас)"
-    avatar_btn = "🖼 Анализировать картинку" if is_image else "🎭 Получить ответ Аватара"
-    avatar_article = InlineQueryResultArticle(
-        id=avatar_id,
-        title=avatar_title,
-        description=avatar_desc,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text=avatar_btn, callback_data=f"inline_gen:{avatar_id}")]]
-        ),
-        input_message_content=InputTextMessageContent(
-            message_text="⏳ <i>Запрос отправлен в Режиме Аватара. Генерирую ответ от вашего лица...</i>",
-            parse_mode="HTML",
-        ),
+    # Карточка 2: 👁 Предпросмотр: Avatar (с кнопками управления/перегенерации)
+    prev_sid = f"prev_{query_hash}"
+    _inline_sessions[prev_sid] = InlineSession(
+        session_id=prev_sid,
+        user_id=user_id,
+        query=clean_query,
+        persona_id=active_p_id,
+        persona_name=active_p_name,
+        persona_prompt=active_p_prompt,
+        is_quick=True,
+        interactive=True,
+    )
+    results.append(
+        InlineQueryResultArticle(
+            id=prev_sid,
+            title=f"👁 Предпросмотр: Avatar ({active_p_name})",
+            description=f"«{prompt_short}» • С кнопками перегенерации и смены стиля",
+            input_message_content=InputTextMessageContent(
+                message_text=f"⏳ <i>Генерирую сообщение в стиле «{active_p_name}»...</i>",
+                parse_mode="HTML",
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data="inl_noop")]]
+            ),
+        )
     )
 
-    # Если пользователь явно начал с /q, показываем Avatar первым, иначе Stand первым
-    results = [avatar_article, stand_article] if is_explicit_q else [stand_article, avatar_article]
+    # Карточки 3..N: Другие Личности Аватара из каталога пользователя
+    for p in personas:
+        if str(p["id"]) == str(active_p_id):
+            continue
+        p_title = p.get("title") or f"🎭 {p['name']}"
+        p_sid = f"p_{p['id']}_{query_hash}"
+        _inline_sessions[p_sid] = InlineSession(
+            session_id=p_sid,
+            user_id=user_id,
+            query=clean_query,
+            persona_id=p["id"],
+            persona_name=p_title,
+            persona_prompt=p["prompt"],
+            is_quick=True,
+            interactive=True,
+        )
+        results.append(
+            InlineQueryResultArticle(
+                id=p_sid,
+                title=f"🎭 {p_title}",
+                description=f"«{prompt_short}» • Стиль: {p_title}",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"⏳ <i>Генерирую сообщение в стиле «{p_title}»...</i>",
+                    parse_mode="HTML",
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data="inl_noop")]]
+                ),
+            )
+        )
+
+    # Карточка: 🥊 Stand-режим
+    stand_sid = f"stand_{query_hash}"
+    _inline_sessions[stand_sid] = InlineSession(
+        session_id=stand_sid,
+        user_id=user_id,
+        query=clean_query,
+        persona_id=None,
+        persona_name="Stand",
+        persona_prompt="",
+        is_quick=False,
+        interactive=False,
+    )
+    is_image = bool(URL_REGEX.search(clean_query))
+    stand_title = "🖼 Stand: Анализ картинки" if is_image else "🥊 Отправить Stand (ИИ-стенд)"
+    results.append(
+        InlineQueryResultArticle(
+            id=stand_sid,
+            title=stand_title,
+            description=f"«{prompt_short}» • Ответ ИИ с цитатой",
+            input_message_content=InputTextMessageContent(
+                message_text=(
+                    f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(clean_query)}</blockquote>\n\n"
+                    "⏳ <i>Запрос отправлен в Stand-режиме. Генерирую ответ...</i>"
+                ),
+                parse_mode="HTML",
+            ),
+        )
+    )
 
     await query.answer(
         results=results,
         cache_time=0,
         is_personal=True,
+        button=InlineQueryResultsButton(
+            text="🎭 Каталог Личностей Аватара",
+            start_parameter="avatars",
+        ),
     )
 
 
@@ -2959,121 +3000,137 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     if not chosen.inline_message_id:
         return
 
-    entry = _pending_inline_prompts.get(chosen.result_id)
-    raw_query = ""
-    is_quick = chosen.result_id.startswith("avatar_")
-    if isinstance(entry, PendingInlineQuery):
-        raw_query = entry.query
-        is_quick = entry.is_quick
-    elif isinstance(entry, tuple):
-        _, raw_query = entry
-    elif isinstance(entry, str):
-        raw_query = entry
-
-    raw_query = raw_query or chosen.query.strip()
-    if raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick ")):
-        raw_query = raw_query.split(maxsplit=1)[1].strip()
-
-    if not raw_query:
-        return
-
     # Если это было голосовое сообщение, оно уже доставлено Telegram нативно через CachedVoice
     if chosen.query.strip().lower().startswith(("/tts", "tts")):
         return
 
+    session_id = chosen.result_id
     _run_background_task(
         _execute_inline_generation(
             bot=chosen.bot,
             user_id=chosen.from_user.id,
-            raw_query=raw_query,
+            session_id=session_id,
             inline_message_id=chosen.inline_message_id,
-            is_quick=is_quick,
+            raw_query_override=chosen.query.strip(),
         )
     )
 
 
-@router.callback_query(F.data.startswith("inline_gen:"))
-async def cb_inline_gen(callback: CallbackQuery) -> None:
-    """Fallback-хендлер для текстовых/визуальных запросов."""
+@router.callback_query(F.data == "inl_noop")
+async def cb_inl_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("inl_regen:"))
+async def cb_inl_regen(callback: CallbackQuery) -> None:
+    session_id = callback.data.split(":", 1)[1]
+    session = _inline_sessions.get(session_id)
+    if not session:
+        await callback.answer("Сессия устарела. Создайте новый запрос через @bot.", show_alert=True)
+        return
+
+    if callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+        await callback.answer("⛔️ Только автор сообщения может управлять генерацией!", show_alert=True)
+        return
+
     if not callback.inline_message_id:
-        await callback.answer("Ошибка: сообщение устарело", show_alert=True)
+        await callback.answer("Ошибка: идентификатор сообщения не найден", show_alert=True)
         return
 
-    result_id = callback.data.split(":", 1)[1]
-    entry = _pending_inline_prompts.get(result_id)
-    if not entry:
-        await callback.answer("Генерирую...")
-        return
-
-    author_id = None
-    raw_query = ""
-    is_quick = result_id.startswith("avatar_")
-    if isinstance(entry, PendingInlineQuery):
-        author_id = entry.user_id
-        raw_query = entry.query
-        is_quick = entry.is_quick
-    elif isinstance(entry, tuple):
-        author_id, raw_query = entry
-    elif isinstance(entry, str):
-        raw_query = entry
-
-    if raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick ")):
-        raw_query = raw_query.split(maxsplit=1)[1].strip()
-
-    if author_id and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
-        await callback.answer("⛔️ Только автор запроса может запустить генерацию!", show_alert=True)
-        return
-
-    await callback.answer("Генерация запущена...")
+    await callback.answer("Генерирую новый вариант... ⏳")
     _run_background_task(
         _execute_inline_generation(
             bot=callback.bot,
-            user_id=author_id or callback.from_user.id,
-            raw_query=raw_query,
+            user_id=session.user_id,
+            session_id=session_id,
             inline_message_id=callback.inline_message_id,
-            is_quick=is_quick,
+            temperature_jitter=True,
         )
     )
 
 
-@router.callback_query(F.data.startswith("inline_tts:"))
-async def cb_inline_tts(callback: CallbackQuery) -> None:
-    """Fallback-хендлер для голосовой озвучки (TTS)."""
+@router.callback_query(F.data.startswith("inl_style:"))
+async def cb_inl_style(callback: CallbackQuery) -> None:
+    session_id = callback.data.split(":", 1)[1]
+    session = _inline_sessions.get(session_id)
+    if not session:
+        await callback.answer("Сессия устарела. Создайте новый запрос через @bot.", show_alert=True)
+        return
+
+    if callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+        await callback.answer("⛔️ Только автор сообщения может управлять стилем!", show_alert=True)
+        return
+
     if not callback.inline_message_id:
-        await callback.answer("Ошибка: сообщение устарело", show_alert=True)
+        await callback.answer("Ошибка: идентификатор сообщения не найден", show_alert=True)
         return
 
-    result_id = callback.data.split(":", 1)[1]
-    entry = _pending_inline_prompts.get(result_id)
-    if not entry:
-        await callback.answer("Генерирую озвучку...")
+    personas = await storage.get_all_personas(session.user_id)
+    if not personas:
+        await callback.answer("Список личностей пуст", show_alert=True)
         return
 
-    author_id = None
-    raw_query = ""
-    if isinstance(entry, PendingInlineQuery):
-        author_id = entry.user_id
-        raw_query = entry.query
-    elif isinstance(entry, tuple):
-        author_id, raw_query = entry
-    elif isinstance(entry, str):
-        raw_query = entry
+    # Находим следующую личность по кругу
+    current_idx = -1
+    for idx, p in enumerate(personas):
+        if str(p["id"]) == str(session.persona_id):
+            current_idx = idx
+            break
 
-    if author_id and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
-        await callback.answer("⛔️ Только автор запроса может запустить озвучку!", show_alert=True)
-        return
+    next_idx = (current_idx + 1) % len(personas)
+    next_p = personas[next_idx]
+    next_title = next_p.get("title") or f"🎭 {next_p['name']}"
 
-    parts = raw_query.split(maxsplit=1)
-    tts_text = parts[1].strip() if len(parts) > 1 else raw_query
-    await callback.answer("Синтез речи запущен...")
+    session.persona_id = next_p["id"]
+    session.persona_name = next_title
+    session.persona_prompt = next_p["prompt"]
+
+    await callback.answer(f"Стиль изменён на: {next_title} 🎭")
     _run_background_task(
-        _execute_inline_tts_generation(
+        _execute_inline_generation(
             bot=callback.bot,
-            user_id=author_id or callback.from_user.id,
-            tts_text=tts_text,
+            user_id=session.user_id,
+            session_id=session_id,
             inline_message_id=callback.inline_message_id,
         )
     )
 
 
+@router.callback_query(F.data.startswith("inl_fix:"))
+async def cb_inl_fix(callback: CallbackQuery) -> None:
+    session_id = callback.data.split(":", 1)[1]
+    session = _inline_sessions.get(session_id)
+    if session and callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+        await callback.answer("⛔️ Только автор сообщения может зафиксировать текст!", show_alert=True)
+        return
 
+    if callback.inline_message_id:
+        try:
+            await callback.bot.edit_message_reply_markup(
+                inline_message_id=callback.inline_message_id,
+                reply_markup=None,
+            )
+        except TelegramBadRequest:
+            pass
+    await callback.answer("Сообщение зафиксировано, кнопки удалены ✅")
+
+
+@router.callback_query(F.data.startswith("inl_del:"))
+async def cb_inl_del(callback: CallbackQuery) -> None:
+    session_id = callback.data.split(":", 1)[1]
+    session = _inline_sessions.get(session_id)
+    if session and callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+        await callback.answer("⛔️ Только автор сообщения может удалить его!", show_alert=True)
+        return
+
+    if callback.inline_message_id:
+        try:
+            await callback.bot.edit_message_text(
+                text="🗑 <i>Сообщение удалено автором.</i>",
+                inline_message_id=callback.inline_message_id,
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        except TelegramBadRequest:
+            pass
+    await callback.answer("Сообщение удалено 🗑")

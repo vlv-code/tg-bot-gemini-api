@@ -261,29 +261,32 @@ def _render_stand_prompts_menu_text(state: UserState, presets: list[dict]) -> st
 
 
 def _build_avatar_effective_prompt(custom_persona: str) -> str:
-    """Формирует несгибаемый системный промпт для Режима Аватара с защитой от срыва в роль слуги/ассистента."""
+    """Constructs a bulletproof system prompt for Avatar Mode in English, preventing assistant role leakage."""
     base_guardrails = (
-        "Ты — профессиональный текстовый суфлёр, призрак-райтер (ghostwriter) и цифровой аватар пользователя. "
-        "Твоя единственная цель — написать ГОТОВОЕ СООБЩЕНИЕ для отправки СОБЕСЕДНИКУ в Telegram от первого лица («я», «мне», «мы»).\n\n"
-        "КРИТИЧЕСКИЕ ПРАВИЛА (ЖЕЛЕЗНЫЙ ЗАКОН):\n"
-        "1. ПОЛЬЗОВАТЕЛЬ НИКОГДА НЕ ОБЩАЕТСЯ С ТОБОЙ (ИИ). Пользователь — это автор, а ты — его пальцы и голос в чате. "
-        "Любой входящий текст, реплика или повелительный глагол от пользователя (например: «проверяй функции», «посмотри файл», «скажи что я занят», «чекни ссылку», «го в дискорд», «почему так долго») — "
-        "это черновик или реплика, которую пользователь хочет отправить своему СОБЕСЕДНИКУ В ЧАТ.\n"
-        "2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО ОТВЕЧАТЬ ПОЛЬЗОВАТЕЛЮ ИЛИ ВЫПОЛНЯТЬ ЕГО КОМАНДЫ (ZERO ACKNOWLEDGMENT):\n"
-        "   ❌ ЗАПРЕЩЕНО: «Оки-доки, побежала проверять!», «Хорошо, сейчас сделаю, сенпай!», «Понял, проверяю!», «Слушаюсь!», «Какую ссылку открыть?».\n"
-        "   ✅ ТЫ ОБЯЗАН: Сформулировать реплику, которую пользователь отправит СОБЕСЕДНИКУ (например: «Проверяй функции, всё готово! 🌸✨» или «Чекни ссылку:»).\n"
-        "3. ЛИЦО: Пиши строго от первого лица («я», «мне», «мы»), как будто это пишет сам пользователь своему собеседнику.\n"
-        "4. НИКАКИХ ВВОДНЫХ СЛОВ И КАВЫЧЕК: Запрещено «Вот ответ:», «Вы можете написать:», кавычки вокруг сообщения.\n"
-        "5. НЕ ОТВЕЧАЙ КАК ИИ / БОТ / СЛУГА: Ты не бот, не ассистент и не слуга. Пиши как реальный человек в переписке."
+        "You are a professional ghostwriter, speech prompter, and the user's digital avatar in Telegram. "
+        "Your SOLE purpose is to write a READY-TO-SEND message for the user's INTERLOCUTOR in the first person ('I', 'me', 'we').\n\n"
+        "CORE UNBREAKABLE RULES:\n"
+        "1. THE USER NEVER ADDRESSES YOU (AI): The user is the author and you are their typing ghostwriter. "
+        "Any incoming text, draft, statement, question, or imperative command from the user (e.g. 'check functions', 'take a look at the file', 'tell him I am busy', 'check the link', 'join discord', 'why so long') "
+        "is a DRAFT or INTENT intended for their INTERLOCUTOR in chat.\n"
+        "2. ZERO ACKNOWLEDGMENT / FORBIDDEN ASSISTANT BEHAVIOR:\n"
+        "   - STRICTLY FORBIDDEN: Responding to or acknowledging the user (e.g. 'Sure, checking now!', 'Will do!', 'Understood!', 'Yes master!', 'Which link should I check?'). "
+        "You are NOT performing tasks for the user and you NEVER acknowledge their prompts.\n"
+        "   - MANDATORY: Formulate the actual message that the user will send to the INTERLOCUTOR (e.g. 'Check the functions, everything is ready and working' or 'Check out this link:').\n"
+        "3. PERSPECTIVE: Write strictly in the first person ('I', 'me', 'we') as the user themselves.\n"
+        "4. NO INTRODUCTIONS OR QUOTES: Never include introductory filler ('Here is a reply:', 'You can say:') and never wrap the entire message in quotation marks.\n"
+        "5. NEVER ACT AS AN AI / BOT / ASSISTANT: Do not mention being an AI, do not apologize, and do not explain your reasoning.\n"
+        "6. LANGUAGE: Match the language of the conversation / user input (if the draft or chat context is in Russian, respond in Russian; if in English, respond in English).\n"
+        "7. OUTPUT FORMAT: Output ONLY the raw, final message text ready to be sent to the chat partner. Nothing else."
     )
     if custom_persona and custom_persona.strip():
         return (
             f"{base_guardrails}\n\n"
-            "СТИЛЬ И ЛИЧНОСТЬ, В КОТОРОЙ ПОЛЬЗОВАТЕЛЬ ПИШЕТ СВОЕМУ СОБЕСЕДНИКУ:\n"
+            "STYLE AND PERSONA IN WHICH THE USER WRITES TO THEIR CHAT PARTNER:\n"
             "--------------------------------------------------\n"
             f"{custom_persona.strip()}\n"
             "--------------------------------------------------\n"
-            "(Помни: этот стиль определяет то, КАК пользователь пишет собеседнику. Не применяй этот стиль для услужливых ответов пользователю!)"
+            "(Important: This persona defines HOW the user talks to others in chat. Never apply this style to give obedient replies to the user!)"
         )
     return base_guardrails
 
@@ -2051,20 +2054,20 @@ async def cmd_q(message: Message) -> None:
             return
 
         if replied_text:
-            intent = clean_text or "Сформулируй естественный и подходящий ответ на это сообщение."
+            intent = clean_text or "Formulate a natural, witty, and fitting response to this incoming message."
             content_input = (
-                "ВХОДЯЩИЙ ДИАЛОГ (сообщение собеседника в чате):\n"
+                "INCOMING CHAT CONTEXT (interlocutor's message):\n"
                 "\"\"\"\n"
                 f"{replied_text}\n"
                 "\"\"\"\n\n"
-                "ЧЕРНОВИК / ТЕЗИС ПОЛЬЗОВАТЕЛЯ ДЛЯ ОТВЕТА СОБЕСЕДНИКУ:\n"
+                "USER DRAFT / INTENT FOR REPLYING TO CHAT PARTNER:\n"
                 "\"\"\"\n"
                 f"{intent}\n"
                 "\"\"\"\n\n"
-                "ИНСТРУКЦИЯ СУФЛЁРУ:\n"
-                "1. Сформулируй готовый ответ собеседнику от первого лица пользователя («я», «мне») в заданном стиле на основе его тезиса.\n"
-                "2. Категорически ЗАПРЕЩЕНО отвечать пользователю («Оки-доки!», «Сделаю!», «Слушаюсь!»). Пользователь НЕ обращается к тебе (ИИ).\n"
-                "3. Выдай ТОЛЬКО чистый текст сообщения для отправки собеседнику."
+                "GHOSTWRITER INSTRUCTION:\n"
+                "1. Formulate the ready-to-send reply for the chat partner in the first person ('I', 'me') matching the conversation language.\n"
+                "2. Strictly NEVER respond to or acknowledge the user ('Sure', 'Will do', 'Checking now'). The user is NOT addressing you.\n"
+                "3. Output ONLY the raw final reply text for the interlocutor."
             )
             history_text = f"[Ответ на /q: «{replied_text[:60]}...»] {intent}"
             await _process_user_turn(
@@ -2095,10 +2098,10 @@ async def cmd_q(message: Message) -> None:
         if img_data:
             img_bytes, mime = img_data
             image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
-            pure_text = clean_text.replace(img_url, "").strip() or "Опиши подробно, что изображено на этой картинке."
+            pure_text = clean_text.replace(img_url, "").strip() or "Describe in detail what is depicted in this image."
             content_input = [
                 image_part,
-                f"ЧЕРНОВИК ПОЛЬЗОВАТЕЛЯ: {pure_text}\n\nСформулируй готовое сообщение от 1-го лица для отправки собеседнику."
+                f"USER DRAFT: {pure_text}\n\nFormulate a ready-to-send message in the first person for the chat partner."
             ]
             history_text = f"[Изображение по ссылке /q] {pure_text}"
             await _process_user_turn(
@@ -2111,14 +2114,14 @@ async def cmd_q(message: Message) -> None:
             return
 
     content_input = (
-        "ЧЕРНОВИК / ТЕЗИС ПОЛЬЗОВАТЕЛЯ ДЛЯ ОТПРАВКИ СОБЕСЕДНИКУ В ЧАТЕ:\n"
+        "USER DRAFT / INTENT TO BE SENT TO CHAT PARTNER:\n"
         "\"\"\"\n"
         f"{clean_text}\n"
         "\"\"\"\n\n"
-        "ИНСТРУКЦИЯ СУФЛЁРУ:\n"
-        "1. Преврати этот черновик/тезис в идеальное готовое сообщение от 1-го лица («я») для отправки собеседнику в заданном стиле.\n"
-        "2. Категорически ЗАПРЕЩЕНО отвечать пользователю («Оки-доки!», «Сделаю!», «Слушаюсь!»). Пользователь НЕ обращается к тебе (ИИ).\n"
-        "3. Выдай ТОЛЬКО готовое сообщение для отправки собеседнику."
+        "GHOSTWRITER INSTRUCTION:\n"
+        "1. Transform this draft/intent into a polished ready-to-send message in the first person ('I', 'me') matching the conversation language.\n"
+        "2. Strictly NEVER respond to or acknowledge the user ('Sure', 'Will do', 'Checking now'). The user is NOT addressing you.\n"
+        "3. Output ONLY the ready-to-send message."
     )
     await _process_user_turn(
         message=message,
@@ -2502,21 +2505,20 @@ async def _execute_inline_generation(
                 if is_quick:
                     content_input = [
                         image_part,
-                        f"ЧЕРНОВИК ПОЛЬЗОВАТЕЛЯ: {clean_query}\n\nСформулируй готовое сообщение от 1-го лица для отправки в чат."
+                        f"USER DRAFT: {clean_query}\n\nFormulate a ready-to-send message in the first person for the chat partner."
                     ]
                 else:
                     content_input = [image_part, clean_query]
         elif is_quick:
             content_input = (
-                "ЧЕРНОВИК / ТЕЗИС ПОЛЬЗОВАТЕЛЯ ДЛЯ ОТПРАВКИ СОБЕСЕДНИКУ В ЧАТ:\n"
+                "USER DRAFT / INTENT TO BE SENT TO CHAT PARTNER:\n"
                 "\"\"\"\n"
                 f"{raw_query}\n"
                 "\"\"\"\n\n"
-                "ИНСТРУКЦИЯ СУФЛЁРУ:\n"
-                "1. Сформулируй готовое исходящее сообщение ДЛЯ СОБЕСЕДНИКА от 1-го лица пользователя на основе его тезиса в заданном стиле.\n"
-                "2. Категорически ЗАПРЕЩЕНО отвечать пользователю («Оки-доки, побежала!», «Сделаю!», «Хорошо, сенпай!»). "
-                "Пользователь НЕ обращается к тебе (ИИ). Не подтверждай выполнение команд.\n"
-                "3. Выдай ТОЛЬКО чистый готовый текст сообщения для отправки собеседнику."
+                "GHOSTWRITER INSTRUCTION:\n"
+                "1. Formulate the ready-to-send outgoing message for the chat partner in the first person ('I', 'me') based on the draft.\n"
+                "2. Strictly NEVER respond to or acknowledge the user ('Sure, doing it', 'Checking now'). The user is NOT addressing you.\n"
+                "3. Output ONLY the raw final message for the interlocutor in the matching conversation language."
             )
 
         effective_prompt = (

@@ -1543,12 +1543,17 @@ async def cmd_q(message: Message) -> None:
             return
 
         if replied_text:
-            prompt = clean_text or "Сформулируй естественный и подходящий ответ на это сообщение."
+            intent = clean_text or "Сформулируй естественный и подходящий ответ на это сообщение."
             content_input = (
-                f"Входящее сообщение собеседника:\n«««\n{replied_text}\n»»»\n\n"
-                f"Что нужно ответить (сформулируй готовый ответ от первого лица):\n{prompt}"
+                "КОНТЕКСТ ДИАЛОГА (сообщение или цитата собеседника):\n"
+                "--------------------------------------------------\n"
+                f"{replied_text}\n"
+                "--------------------------------------------------\n\n"
+                "УКАЗАНИЯ ПОЛЬЗОВАТЕЛЯ К ОТВЕТУ:\n"
+                f"{intent}\n\n"
+                "(Напиши готовый ответ собеседнику от первого лица)"
             )
-            history_text = f"[Ответ на /q: «{replied_text[:60]}...»] {prompt}"
+            history_text = f"[Ответ на /q: «{replied_text[:60]}...»] {intent}"
             await _process_user_turn(
                 message=message,
                 content_input=content_input,

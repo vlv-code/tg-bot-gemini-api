@@ -186,10 +186,11 @@ def _render_prompt_menu_text(state: UserState) -> str:
     status = " (индивидуальный)" if is_custom else " (глобальный дефолт)"
 
     return (
-        f"📝 <b>Системный промпт</b>{status}:\n\n"
+        f"🥊 <b>Системный промпт (Stand-режим)</b>{status}:\n\n"
         f"<code>{html.escape(effective)}</code>\n\n"
         "• Чтобы задать новый промпт: отправьте команду <code>/prompt текст промпта</code>\n"
-        "• Чтобы сбросить к дефолту: нажмите кнопку ниже или <code>/prompt reset</code>"
+        "• Чтобы сбросить к дефолту: нажмите кнопку ниже или <code>/prompt reset</code>\n\n"
+        "💡 <i>Stand-режим — ваш персональный ИИ-стенд (диалог с памятью, анализ медиа, голос/текст).</i>"
     )
 
 
@@ -203,11 +204,11 @@ def _render_qprompt_menu_text(state: UserState) -> str:
     status = " (индивидуальный)" if is_custom else " (глобальный дефолт)"
 
     return (
-        f"⚡️ <b>Системный промпт для режима /q</b>{status}:\n\n"
+        f"🎭 <b>Системный промпт (Режим Аватара /q)</b>{status}:\n\n"
         f"<code>{html.escape(effective)}</code>\n\n"
         "• Чтобы задать новый промпт: <code>/qprompt текст промпта</code>\n"
         "• Чтобы сбросить к дефолту: нажмите кнопку ниже или <code>/qprompt reset</code>\n\n"
-        "💡 <i>В режиме /q бот присылает чистый ответ нейросети без цитирования вопроса.</i>"
+        "💡 <i>В Режиме Аватара бот пишет готовый ответ собеседнику от 1-го лица с изолированной памятью.</i>"
     )
 
 
@@ -1559,11 +1560,11 @@ async def cmd_q(message: Message) -> None:
 
     if not clean_text:
         await message.answer(
-            "⚡️ <b>Режим чистого ответа (/q):</b>\n\n"
-            "Использование: <code>/q ваш вопрос</code>\n"
-            "Или ответьте командой <code>/q</code> на любое фото/текст.\n\n"
-            "• В этом режиме бот присылает <b>только чистый ответ</b> нейросети без цитирования вашего вопроса.\n"
-            "• Используется отдельный краткий промпт (настройка: <code>/qprompt</code>).",
+            "🎭 <b>Режим Аватара (/q):</b>\n\n"
+            "Использование: <code>/q ваши указания/мысль</code>\n"
+            "Или ответьте командой <code>/q</code> на любое входящее сообщение/фото в чате.\n\n"
+            "• Бот выступает вашим текстовым суфлёром и пишет <b>готовый ответ от 1-го лица</b> («я», «мне») без цитирования и лишних фраз.\n"
+            "• Имеет <b>собственную изолированную память</b> и отдельный промпт (настройка: <code>/qprompt</code>).",
             parse_mode="HTML",
         )
         return
@@ -2254,10 +2255,10 @@ async def handle_inline(query: InlineQuery) -> None:
         if not q_text:
             article = InlineQueryResultArticle(
                 id="q_hint",
-                title="⚡️ Чистый ответ (/q)",
-                description="Наберите: @bot_username /q Ваш вопрос",
+                title="🎭 Режим Аватара (/q)",
+                description="Наберите: @bot_username /q Ваши указания / контекст",
                 input_message_content=InputTextMessageContent(
-                    message_text="Использование чистого ответа: <code>@bot_username /q Ваш вопрос</code>",
+                    message_text="Использование Режима Аватара: <code>@bot_username /q Ваши указания / контекст</code>",
                     parse_mode="HTML",
                 ),
             )
@@ -2271,9 +2272,9 @@ async def handle_inline(query: InlineQuery) -> None:
         )
 
         is_image = bool(URL_REGEX.search(q_text))
-        title = "⚡️🖼 Чистый ответ по картинке (/q)" if is_image else "⚡️ Чистый ответ Gemini (/q)"
+        title = "🎭🖼 Режим Аватара (по картинке)" if is_image else "🎭 Режим Аватара (ответ от 1-го лица)"
         prompt_short = q_text[:80] + ("…" if len(q_text) > 80 else "")
-        button_text = "🖼 Анализировать картинку" if is_image else "⚡️ Получить чистый ответ"
+        button_text = "🖼 Анализировать картинку" if is_image else "🎭 Сгенерировать ответ аватара"
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -2289,7 +2290,7 @@ async def handle_inline(query: InlineQuery) -> None:
         article = InlineQueryResultArticle(
             id=result_id,
             title=title,
-            description=f"«{prompt_short}» (без цитирования вопроса)",
+            description=f"«{prompt_short}» (чистый ответ от 1-го лица)",
             reply_markup=keyboard,
             input_message_content=InputTextMessageContent(
                 message_text="⏳ <i>Запрос отправлен. Нажмите кнопку ниже для генерации ответа:</i>",
@@ -2299,7 +2300,7 @@ async def handle_inline(query: InlineQuery) -> None:
         await query.answer(results=[article], cache_time=0, is_personal=True)
         return
 
-    # Режим 3: Картинка по ссылке или стандартный запрос к Gemini
+    # Режим 3: Картинка по ссылке или стандартный запрос к Gemini (Stand-режим)
     _pending_inline_prompts[result_id] = PendingInlineQuery(
         user_id=query.from_user.id,
         query=raw_query,
@@ -2307,10 +2308,10 @@ async def handle_inline(query: InlineQuery) -> None:
     )
 
     is_image = bool(URL_REGEX.search(raw_query))
-    title = "🖼 Анализ картинки по ссылке" if is_image else "💬 Спросить Gemini"
+    title = "🖼 Анализ картинки по ссылке" if is_image else "🥊 Спросить Gemini (Stand-режим)"
     prompt_short = raw_query[:80] + ("…" if len(raw_query) > 80 else "")
 
-    button_text = "🖼 Анализировать картинку" if is_image else "⚡️ Получить ответ"
+    button_text = "🖼 Анализировать картинку" if is_image else "🥊 Получить ответ Stand"
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [

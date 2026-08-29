@@ -12,9 +12,26 @@ def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎙 Настройки озвучки (TTS)", callback_data="menu:tts")],
         [InlineKeyboardButton(text="⚙️ Параметры чата и история", callback_data="menu:settings")],
         [InlineKeyboardButton(text="📊 Лимиты запросов", callback_data="menu:limits")],
+        [InlineKeyboardButton(text="ℹ️ О боте и руководство", callback_data="menu:info")],
     ]
     if is_admin:
         buttons.append([InlineKeyboardButton(text="👑 Панель администратора", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def info_menu_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура раздела 'О боте и руководство'."""
+    buttons = [
+        [
+            InlineKeyboardButton(text="🎭 Личности Аватара", callback_data="menu:personas"),
+            InlineKeyboardButton(text="🥊 Промпты Stand", callback_data="menu:prompts"),
+        ],
+        [
+            InlineKeyboardButton(text="🤖 Выбрать модель", callback_data="menu:model"),
+            InlineKeyboardButton(text="🎙 Настройки TTS", callback_data="menu:tts"),
+        ],
+        [InlineKeyboardButton(text="◀️ В главное меню", callback_data="menu:main")],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

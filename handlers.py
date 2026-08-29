@@ -36,6 +36,7 @@ from keyboards import (
     admin_panel_keyboard,
     admin_users_keyboard,
     clear_history_chats_keyboard,
+    info_menu_keyboard,
     limits_keyboard,
     main_menu_keyboard,
     models_keyboard,
@@ -260,6 +261,30 @@ def _render_stand_prompts_menu_text(state: UserState, presets: list[dict]) -> st
     )
 
 
+def _render_info_text() -> str:
+    """Генерирует справочный текст с кратким руководством по всем функциям и режимам бота."""
+    return (
+        "🌟 <b>Справка и руководство по боту (Gemini Bot)</b>\n\n"
+        "Бот работает в <b>двух независимых режимах</b> с раздельной памятью:\n\n"
+        "🥊 <b>1. Stand-режим (Основной ИИ-помощник за спиной)</b>\n"
+        "• <i>Как пользоваться:</i> Пишите боту напрямую, присылайте голосовые, фото, PDF или документы.\n"
+        "• <i>Поведение:</i> Экспертный ИИ-собеседник. Анализирует код и файлы, помнит контекст диалога, цитирует запросы.\n"
+        "• <i>Роли и промпты:</i> <code>/prompts</code> (Кодер, Сисадмин, Переводчик, Аналитик или свой через <code>/prompt edit</code>).\n\n"
+        "🎭 <b>2. Режим Аватара (Ghostwriter / Текстовый суфлёр)</b>\n"
+        "• <i>Как пользоваться:</i> В любом чате наберите <code>@bot_username ваш черновик</code> и выберите <b>«🎭 Отправить Avatar»</b>, либо ответьте на сообщение в чате через <code>/avatar</code>.\n"
+        "• <i>Поведение:</i> Бот пишет <b>готовое сообщение за вас от 1-го лица</b> («я», «мне») в заданном стиле, без цитирования и без метатекста.\n"
+        "• <i>Личности:</i> <code>/avatars</code> (Бро, Бизнес, Сарказм, Краткий, Флирт или своя через <code>/avatar edit</code>).\n\n"
+        "🎙 <b>Озвучка (TTS) и Инлайн-режим:</b>\n"
+        "• <code>/tts текст</code> — озвучить любой текст выбранным голосом.\n"
+        "• В любом чате наберите <code>@bot_username текст</code> для выбора карточек: <b>🥊 Stand</b>, <b>🎭 Avatar</b> или <b>🎧 TTS</b>.\n\n"
+        "🛠 <b>Полезные команды:</b>\n"
+        "• <code>/menu</code> — главное интерактивное меню всех настроек\n"
+        "• <code>/model</code> — выбор нейросети (Gemini 3.5 Flash Lite, 3.7 Flash и др.)\n"
+        "• <code>/limits</code> — остаток лимитов запросов и токенов\n"
+        "• <code>/clear</code> — очистка истории диалога"
+    )
+
+
 def _build_avatar_effective_prompt(custom_persona: str) -> str:
     """Constructs a bulletproof system prompt for Avatar Mode in English, preventing assistant role leakage."""
     base_guardrails = (
@@ -424,6 +449,16 @@ async def cmd_menu(message: Message) -> None:
         _render_main_menu_text(state),
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(is_admin=is_admin),
+    )
+
+
+@router.message(Command("help", "info", "guide", "справка", "инфо"))
+async def cmd_info(message: Message) -> None:
+    """О боте, руководство и список возможностей."""
+    await message.answer(
+        _render_info_text(),
+        parse_mode="HTML",
+        reply_markup=info_menu_keyboard(),
     )
 
 
@@ -1307,7 +1342,20 @@ async def cb_reset_qprompt(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer("Промпт для /q сброшен к дефолтному ✅")
+    await callback.answer("Промпт Аватара сброшен к дефолту ✅")
+
+
+@router.callback_query(F.data == "menu:info")
+async def cb_menu_info(callback: CallbackQuery) -> None:
+    try:
+        await callback.message.edit_text(
+            _render_info_text(),
+            parse_mode="HTML",
+            reply_markup=info_menu_keyboard(),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:personas")

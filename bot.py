@@ -12,6 +12,7 @@ from middlewares import AccessMiddleware
 BOT_COMMANDS = [
     BotCommand(command="menu", description="Главное меню настроек и моделей"),
     BotCommand(command="start", description="Запустить бота и открыть меню"),
+    BotCommand(command="help", description="ℹ️ Справка и краткое руководство по боту"),
     BotCommand(command="avatar", description="🎭 Режим Аватара: выбор и настройка Личностей"),
     BotCommand(command="avatars", description="🎭 Каталог Личностей Аватара (Бро, Бизнес...)"),
     BotCommand(command="prompt", description="🥊 Настроить/изменить промпт Stand-режима"),

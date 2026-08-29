@@ -1584,6 +1584,19 @@ async def _execute_inline_generation(
     inline_message_id: str,
 ) -> None:
     """Генерирует ответ Gemini (текст или анализ картинки по ссылке) и редактирует инлайн-сообщение."""
+    try:
+        await bot.edit_message_text(
+            text=(
+                f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
+                "✨ <i>Gemini генерирует ответ...</i>"
+            ),
+            inline_message_id=inline_message_id,
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        pass
+
     async with user_locks.get(user_id):
         limit_status = await limiter.check(user_id)
         if not limit_status.allowed:
@@ -1884,14 +1897,15 @@ async def handle_inline(query: InlineQuery) -> None:
 
     # Режим 2: Картинка по ссылке
     is_image = bool(URL_REGEX.search(raw_query))
-    title = "🖼 Анализ картинки по ссылке" if is_image else "💬 Отправить запрос к Gemini"
+    title = "🖼 Анализ картинки по ссылке" if is_image else "💬 Спросить Gemini"
     prompt_short = raw_query[:80] + ("…" if len(raw_query) > 80 else "")
 
+    button_text = "🖼 Анализировать картинку" if is_image else "⚡️ Получить ответ"
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="⏳ Анализирую..." if is_image else "⏳ Генерирую ответ...",
+                    text=button_text,
                     callback_data=f"inline_gen:{result_id}",
                 )
             ]
@@ -1901,12 +1915,12 @@ async def handle_inline(query: InlineQuery) -> None:
     article = InlineQueryResultArticle(
         id=result_id,
         title=title,
-        description=f"«{prompt_short}» (нажмите для отправки)",
+        description=f"«{prompt_short}» (нажмите для отправки в чат)",
         reply_markup=keyboard,
         input_message_content=InputTextMessageContent(
             message_text=(
                 f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                "⏳ <i>Генерирую ответ от Gemini...</i>"
+                "⏳ <i>Запрос отправлен. Нажмите кнопку ниже для генерации ответа:</i>"
             ),
             parse_mode="HTML",
         ),

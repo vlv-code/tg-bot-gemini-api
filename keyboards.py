@@ -159,9 +159,12 @@ def personas_menu_keyboard(personas: list[dict], current_prompt: str) -> InlineK
 
     buttons.append([
         InlineKeyboardButton(text="➕ Создать личность", callback_data="persona:add_hint"),
-        InlineKeyboardButton(text="🔄 Дефолт", callback_data="reset_qprompt"),
+        InlineKeyboardButton(text="ℹ️ Памятка по стилям", callback_data="persona:guide"),
     ])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад в главное меню", callback_data="menu:main")])
+    buttons.append([
+        InlineKeyboardButton(text="🔄 Сброс к дефолту", callback_data="reset_qprompt"),
+        InlineKeyboardButton(text="◀️ Назад в меню", callback_data="menu:main"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

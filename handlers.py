@@ -1445,9 +1445,40 @@ async def cb_persona_edit(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "persona:add_hint")
 async def cb_persona_add_hint(callback: CallbackQuery) -> None:
     await callback.answer(
-        "Чтобы создать личность, отправьте команду:\n/avatar add Имя = Описание стиля",
+        "Чтобы создать/изменить личность, отправьте команду:\n/avatar edit Имя = Описание стиля",
         show_alert=True,
     )
+
+
+@router.callback_query(F.data == "persona:guide")
+async def cb_persona_guide(callback: CallbackQuery) -> None:
+    text = (
+        "💡 <b>Как правильно составлять Личности Аватара</b>\n\n"
+        "Личность Аватара — это <b>манера речи ваших сообщений</b> собеседникам в чатах, а не то, как бот общается лично с вами.\n\n"
+        "❌ <b>Как НЕ надо писать:</b>\n"
+        "• <i>«Отвечай мне как...»</i>\n"
+        "• <i>«Answer me cutely as senpai...»</i>\n"
+        "• <i>«Слушайся моих команд...»</i>\n"
+        "⚠️ <i>Слова «Отвечай мне» заставляют ИИ думать, что вы отдаёте ему поручение, а не пишете черновик для чата.</i>\n\n"
+        "✅ <b>Как ПРАВИЛЬНО писать промпт личности:</b>\n"
+        "Описывайте сам стиль текста сообщений, тон и оформление:\n"
+        "• <i>«Пиши все сообщения мило, кавайно и игриво, используй эмодзи (🌸, ✨, 🐾, 💖) и милые словечки.»</i>\n"
+        "• <i>«Пиши как лучший друг: на 'ты', с юмором, дружелюбно, кратко и без официоза.»</i>\n"
+        "• <i>«Общайся строго по делу, вежливо, конструктивно и на 'вы'.»</i>\n\n"
+        "📝 <b>Создать или изменить личность:</b>\n"
+        "<code>/avatar edit Имя = Описание стиля</code>"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать личность", callback_data="persona:add_hint")],
+            [InlineKeyboardButton(text="◀️ Назад к списку личностей", callback_data="menu:personas")],
+        ]
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:prompts")

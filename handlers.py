@@ -2074,13 +2074,13 @@ async def handle_inline(query: InlineQuery) -> None:
     if not raw_query:
         help_article = InlineQueryResultArticle(
             id="inline_help",
-            title="💬 Задайте вопрос Gemini...",
-            description="Наберите: @bot_username вопрос (или /tts текст, или ссылка на картинку)",
+            title="💬 Введите запрос для Gemini...",
+            description="Появятся 2 варианта: 🥊 Отправить Stand или 🎭 Отправить Avatar",
             input_message_content=InputTextMessageContent(
                 message_text=(
                     "Чтобы обратиться к Gemini в любом чате, наберите:\n"
-                    "• <code>@bot_username ваш вопрос</code>\n"
-                    "• <code>@bot_username /tts текст для озвучки</code>\n"
+                    "• <code>@bot_username ваш вопрос</code> (выберите <b>🥊 Stand</b> или <b>🎭 Avatar</b>)\n"
+                    "• <code>@bot_username /tts текст</code> (голосовое сообщение)\n"
                     "• <code>@bot_username https://ссылка_на_картинку вопрос</code>"
                 ),
                 parse_mode="HTML",
@@ -2092,8 +2092,6 @@ async def handle_inline(query: InlineQuery) -> None:
             is_personal=True,
         )
         return
-
-    result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
 
     if len(_pending_inline_prompts) > 1000:
         for k in list(_pending_inline_prompts.keys())[:200]:
@@ -2116,6 +2114,7 @@ async def handle_inline(query: InlineQuery) -> None:
             await query.answer(results=[article], cache_time=0, is_personal=True)
             return
 
+        result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
         user_id = query.from_user.id
         state = await storage.get_settings(user_id)
 
@@ -2247,98 +2246,70 @@ async def handle_inline(query: InlineQuery) -> None:
             pass
         return
 
-    # Режим 2: Чистый ответ без цитирования (/q или q)
-    is_q_mode = raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick "))
-    if is_q_mode:
-        parts = raw_query.split(maxsplit=1)
-        q_text = parts[1].strip() if len(parts) > 1 else ""
-        if not q_text:
-            article = InlineQueryResultArticle(
-                id="q_hint",
-                title="🎭 Режим Аватара (/q)",
-                description="Наберите: @bot_username /q Ваши указания / контекст",
-                input_message_content=InputTextMessageContent(
-                    message_text="Использование Режима Аватара: <code>@bot_username /q Ваши указания / контекст</code>",
-                    parse_mode="HTML",
-                ),
-            )
-            await query.answer(results=[article], cache_time=0, is_personal=True)
-            return
+    # Режимы Stand и Avatar: предлагаем пользователю оба варианта на выбор
+    is_explicit_q = raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick "))
+    clean_query = raw_query.split(maxsplit=1)[1].strip() if is_explicit_q else raw_query
 
-        _pending_inline_prompts[result_id] = PendingInlineQuery(
-            user_id=query.from_user.id,
-            query=q_text,
-            is_quick=True,
-        )
+    query_hash = hashlib.sha256(clean_query.encode("utf-8")).hexdigest()[:20]
+    stand_id = f"stand_{query_hash}"
+    avatar_id = f"avatar_{query_hash}"
 
-        is_image = bool(URL_REGEX.search(q_text))
-        title = "🎭🖼 Режим Аватара (по картинке)" if is_image else "🎭 Режим Аватара (ответ от 1-го лица)"
-        prompt_short = q_text[:80] + ("…" if len(q_text) > 80 else "")
-        button_text = "🖼 Анализировать картинку" if is_image else "🎭 Сгенерировать ответ аватара"
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=button_text,
-                        callback_data=f"inline_gen:{result_id}",
-                    )
-                ]
-            ]
-        )
-
-        article = InlineQueryResultArticle(
-            id=result_id,
-            title=title,
-            description=f"«{prompt_short}» (чистый ответ от 1-го лица)",
-            reply_markup=keyboard,
-            input_message_content=InputTextMessageContent(
-                message_text="⏳ <i>Запрос отправлен. Нажмите кнопку ниже для генерации ответа:</i>",
-                parse_mode="HTML",
-            ),
-        )
-        await query.answer(results=[article], cache_time=0, is_personal=True)
-        return
-
-    # Режим 3: Картинка по ссылке или стандартный запрос к Gemini (Stand-режим)
-    _pending_inline_prompts[result_id] = PendingInlineQuery(
+    _pending_inline_prompts[stand_id] = PendingInlineQuery(
         user_id=query.from_user.id,
-        query=raw_query,
+        query=clean_query,
         is_quick=False,
     )
-
-    is_image = bool(URL_REGEX.search(raw_query))
-    title = "🖼 Анализ картинки по ссылке" if is_image else "🥊 Спросить Gemini (Stand-режим)"
-    prompt_short = raw_query[:80] + ("…" if len(raw_query) > 80 else "")
-
-    button_text = "🖼 Анализировать картинку" if is_image else "🥊 Получить ответ Stand"
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=button_text,
-                    callback_data=f"inline_gen:{result_id}",
-                )
-            ]
-        ]
+    _pending_inline_prompts[avatar_id] = PendingInlineQuery(
+        user_id=query.from_user.id,
+        query=clean_query,
+        is_quick=True,
     )
 
-    article = InlineQueryResultArticle(
-        id=result_id,
-        title=title,
-        description=f"«{prompt_short}» (нажмите для отправки в чат)",
-        reply_markup=keyboard,
+    is_image = bool(URL_REGEX.search(clean_query))
+    prompt_short = clean_query[:70] + ("…" if len(clean_query) > 70 else "")
+
+    # Карточка 1: Stand-режим (ответ ИИ-помощника с цитатой)
+    stand_title = "🖼 Stand: Анализ картинки" if is_image else "🥊 Отправить Stand (ИИ-стенд)"
+    stand_desc = f"«{prompt_short}» (ответ ИИ с цитатой)"
+    stand_btn = "🖼 Анализировать картинку" if is_image else "🥊 Получить ответ Stand"
+    stand_article = InlineQueryResultArticle(
+        id=stand_id,
+        title=stand_title,
+        description=stand_desc,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=stand_btn, callback_data=f"inline_gen:{stand_id}")]]
+        ),
         input_message_content=InputTextMessageContent(
             message_text=(
-                f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n"
-                "⏳ <i>Запрос отправлен. Нажмите кнопку ниже для генерации ответа:</i>"
+                f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(clean_query)}</blockquote>\n\n"
+                "⏳ <i>Запрос отправлен в Stand-режиме. Генерирую ответ...</i>"
             ),
             parse_mode="HTML",
         ),
     )
 
+    # Карточка 2: Режим Аватара (чистый ответ от 1-го лица за пользователя)
+    avatar_title = "🎭🖼 Avatar: Анализ картинки" if is_image else "🎭 Отправить Avatar (от 1-го лица)"
+    avatar_desc = f"«{prompt_short}» (чистый ответ за вас)"
+    avatar_btn = "🖼 Анализировать картинку" if is_image else "🎭 Получить ответ Аватара"
+    avatar_article = InlineQueryResultArticle(
+        id=avatar_id,
+        title=avatar_title,
+        description=avatar_desc,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=avatar_btn, callback_data=f"inline_gen:{avatar_id}")]]
+        ),
+        input_message_content=InputTextMessageContent(
+            message_text="⏳ <i>Запрос отправлен в Режиме Аватара. Генерирую ответ от вашего лица...</i>",
+            parse_mode="HTML",
+        ),
+    )
+
+    # Если пользователь явно начал с /q, показываем Avatar первым, иначе Stand первым
+    results = [avatar_article, stand_article] if is_explicit_q else [stand_article, avatar_article]
+
     await query.answer(
-        results=[article],
+        results=results,
         cache_time=0,
         is_personal=True,
     )
@@ -2360,7 +2331,7 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
 
     entry = _pending_inline_prompts.get(chosen.result_id)
     raw_query = ""
-    is_quick = False
+    is_quick = chosen.result_id.startswith("avatar_")
     if isinstance(entry, PendingInlineQuery):
         raw_query = entry.query
         is_quick = entry.is_quick
@@ -2369,12 +2340,15 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     elif isinstance(entry, str):
         raw_query = entry
 
-    raw_query = chosen.query.strip() or raw_query
+    raw_query = raw_query or chosen.query.strip()
+    if raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick ")):
+        raw_query = raw_query.split(maxsplit=1)[1].strip()
+
     if not raw_query:
         return
 
     # Если это было голосовое сообщение, оно уже доставлено Telegram нативно через CachedVoice
-    if raw_query.lower().startswith(("/tts", "tts")):
+    if chosen.query.strip().lower().startswith(("/tts", "tts")):
         return
 
     _run_background_task(
@@ -2403,7 +2377,7 @@ async def cb_inline_gen(callback: CallbackQuery) -> None:
 
     author_id = None
     raw_query = ""
-    is_quick = False
+    is_quick = result_id.startswith("avatar_")
     if isinstance(entry, PendingInlineQuery):
         author_id = entry.user_id
         raw_query = entry.query
@@ -2412,6 +2386,9 @@ async def cb_inline_gen(callback: CallbackQuery) -> None:
         author_id, raw_query = entry
     elif isinstance(entry, str):
         raw_query = entry
+
+    if raw_query.lower().startswith(("/q ", "q ", "/quick ", "quick ")):
+        raw_query = raw_query.split(maxsplit=1)[1].strip()
 
     if author_id and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
         await callback.answer("⛔️ Только автор запроса может запустить генерацию!", show_alert=True)

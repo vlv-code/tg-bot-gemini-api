@@ -21,8 +21,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import heapq
 import itertools
+import logging
 import time
 from typing import Any, AsyncIterator, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class UserLocks:
@@ -107,8 +110,8 @@ class GlobalQueueManager:
                     res = on_waiting(position)
                     if asyncio.iscoroutine(res):
                         await res
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Исключение в колбэке on_waiting очереди: %s", exc, exc_info=True)
 
             try:
                 await future

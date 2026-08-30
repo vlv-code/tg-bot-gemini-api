@@ -35,25 +35,28 @@ async def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Инициализируем базу данных SQLite
-    await storage.init_db()
-
-    # parse_mode на уровне бота не ставим: rich/plain режим выбирается
-    # per-message в handlers.py в зависимости от настройки пользователя
-    bot = Bot(token=settings.telegram_token, default=DefaultBotProperties(parse_mode=None))
-    dispatcher = Dispatcher()
-    dispatcher.update.outer_middleware(AccessMiddleware(storage=storage))
-    dispatcher.include_router(router)
-
-    await bot.set_my_commands(BOT_COMMANDS)
-    logging.info("Меню команд успешно зарегистрировано в Telegram")
-
-    await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Бот запущен, доступные модели: %s", settings.available_models)
-
+    bot: Bot | None = None
     try:
+        # Инициализируем базу данных SQLite
+        await storage.init_db()
+
+        # parse_mode на уровне бота не ставим: rich/plain режим выбирается
+        # per-message в handlers.py в зависимости от настройки пользователя
+        bot = Bot(token=settings.telegram_token, default=DefaultBotProperties(parse_mode=None))
+        dispatcher = Dispatcher()
+        dispatcher.update.outer_middleware(AccessMiddleware(storage=storage))
+        dispatcher.include_router(router)
+
+        await bot.set_my_commands(BOT_COMMANDS)
+        logging.info("Меню команд успешно зарегистрировано в Telegram")
+
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Бот запущен, доступные модели: %s", settings.available_models)
+
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
+        if bot is not None:
+            await bot.session.close()
         await storage.close()
 
 

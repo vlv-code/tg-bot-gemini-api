@@ -93,11 +93,11 @@ class UserStorage:
             columns = [row["name"] for row in await cursor.fetchall()]
             if "tts_model" not in columns:
                 await db.execute(
-                    f"ALTER TABLE users ADD COLUMN tts_model TEXT NOT NULL DEFAULT '{self._default_tts_model}'"
+                    "ALTER TABLE users ADD COLUMN tts_model TEXT NOT NULL DEFAULT ''"
                 )
             if "tts_voice" not in columns:
                 await db.execute(
-                    f"ALTER TABLE users ADD COLUMN tts_voice TEXT NOT NULL DEFAULT '{self._default_tts_voice}'"
+                    "ALTER TABLE users ADD COLUMN tts_voice TEXT NOT NULL DEFAULT ''"
                 )
             if "quick_prompt" not in columns:
                 await db.execute(
@@ -225,6 +225,9 @@ class UserStorage:
             await db.commit()
 
             self._db = db
+
+        # Автоматическая очистка устаревших записей при инициализации базы данных
+        await self.cleanup_old_data()
 
     async def close(self) -> None:
         """Закрывает постоянное соединение с базой данных."""
@@ -856,6 +859,35 @@ class UserStorage:
         all_personas = await self.get_all_personas(user_id)
         pinned_ids = await self.get_pinned_persona_ids(user_id)
         return [p for p in all_personas if str(p["id"]) in pinned_ids]
+
+    async def cleanup_old_data(
+        self, days_token_usage: int = 60, days_tts_cache: int = 30
+    ) -> dict[str, int]:
+        """Удаляет устаревшие записи токенов и кэша TTS для предотвращения бесконечного роста БД."""
+        db = await self._ensure_db()
+        cursor_tok = await db.execute(
+            "DELETE FROM token_usage WHERE created_at < datetime('now', ?)",
+            (f"-{days_token_usage} days",),
+        )
+        deleted_tokens = cursor_tok.rowcount
+        cursor_tts = await db.execute(
+            "DELETE FROM tts_cache WHERE created_at < datetime('now', ?)",
+            (f"-{days_tts_cache} days",),
+        )
+        deleted_tts = cursor_tts.rowcount
+        await db.commit()
+        return {"token_usage_deleted": deleted_tokens, "tts_cache_deleted": deleted_tts}
+
+    async def backup_to_file(self, target_path: str) -> None:
+        """Создаёт онлайн-бэкап базы данных через команду SQLite VACUUM INTO без остановки бота."""
+        db = await self._ensure_db()
+        dirname = os.path.dirname(os.path.abspath(target_path))
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        safe_path = target_path.replace("'", "''")
+        await db.execute(f"VACUUM INTO '{safe_path}'")
 
 
 DEFAULT_AVATAR_PERSONAS = [

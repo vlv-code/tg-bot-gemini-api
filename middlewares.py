@@ -26,7 +26,7 @@ class AccessMiddleware(BaseMiddleware):
 
         user = data.get("event_from_user")
         if user is None:
-            return await handler(event, data)
+            return None  # fail-closed: без явного пользователя доступ закрыт
 
         allowed = await self.storage.is_user_allowed(user.id)
         if not allowed:

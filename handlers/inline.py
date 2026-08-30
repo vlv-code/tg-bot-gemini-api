@@ -3,6 +3,7 @@ import hashlib
 import html
 import logging
 import time
+from typing import Optional, Union
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest

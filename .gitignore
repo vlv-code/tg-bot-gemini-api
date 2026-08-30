@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.class
@@ -50,3 +50,6 @@ Thumbs.db
 
 # Logs & temp
 *.log
+
+# Workflows (requires workflow PAT scope)
+.github/

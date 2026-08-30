@@ -58,7 +58,7 @@ async def cmd_menu(message: Message) -> None:
         chat_title=chat_title,
         chat_type=message.chat.type,
     )
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     is_admin = await storage.is_user_admin(user_id)
     await message.answer(
         _render_main_menu_text(state),
@@ -79,7 +79,7 @@ async def cmd_info(message: Message) -> None:
 
 @router.message(Command("model"))
 async def cmd_model(message: Message) -> None:
-    state = await storage.get(message.from_user.id, chat_id=message.chat.id)
+    state = await storage.get_settings(message.from_user.id)
     await message.answer(
         f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
         parse_mode="HTML",
@@ -89,7 +89,7 @@ async def cmd_model(message: Message) -> None:
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
-    state = await storage.get(message.from_user.id, chat_id=message.chat.id)
+    state = await storage.get_settings(message.from_user.id)
     await message.answer(
         "⚙️ <b>Параметры чата и ответов:</b>",
         parse_mode="HTML",
@@ -248,7 +248,7 @@ async def cb_speak_response(callback: CallbackQuery) -> None:
 async def cb_menu_main(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     is_admin = await storage.is_user_admin(user_id)
     try:
         await callback.message.edit_text(
@@ -263,8 +263,7 @@ async def cb_menu_main(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:model")
 async def cb_menu_model(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
@@ -301,7 +300,7 @@ async def cb_set_model(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:tts")
 async def cb_menu_tts(callback: CallbackQuery) -> None:
-    state = await storage.get(callback.from_user.id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             _render_tts_menu_text(state),
@@ -315,7 +314,7 @@ async def cb_menu_tts(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:tts_models")
 async def cb_menu_tts_models(callback: CallbackQuery) -> None:
-    state = await storage.get(callback.from_user.id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             f"🎙 Выберите модель для синтеза речи TTS (текущая: <code>{html.escape(state.tts_model)}</code>):",
@@ -346,7 +345,7 @@ async def cb_set_tts_model(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:tts_voices")
 async def cb_menu_tts_voices(callback: CallbackQuery) -> None:
-    state = await storage.get(callback.from_user.id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             f"🗣 Выберите голос для озвучки (текущий: <code>{html.escape(state.tts_voice)}</code>):",
@@ -378,7 +377,7 @@ async def cb_set_tts_voice(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "toggle_voice_tts")
 async def cb_toggle_voice_tts(callback: CallbackQuery) -> None:
     voice = await storage.toggle_voice(callback.from_user.id)
-    state = await storage.get(callback.from_user.id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             _render_tts_menu_text(state),
@@ -392,8 +391,7 @@ async def cb_toggle_voice_tts(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:settings")
 async def cb_menu_settings(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             "⚙️ <b>Параметры чата и ответов:</b>",
@@ -407,9 +405,8 @@ async def cb_menu_settings(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "toggle_rich")
 async def cb_toggle_rich(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     rich = await storage.toggle_rich(callback.from_user.id)
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             "⚙️ <b>Параметры чата и ответов:</b>",
@@ -423,9 +420,8 @@ async def cb_toggle_rich(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "toggle_voice")
 async def cb_toggle_voice(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     voice = await storage.toggle_voice(callback.from_user.id)
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             "⚙️ <b>Параметры чата и ответов:</b>",
@@ -484,7 +480,7 @@ async def cb_clear_chat(callback: CallbackQuery) -> None:
             pass
     else:
         chat_id = callback.message.chat.id if callback.message else user_id
-        state = await storage.get(user_id, chat_id=chat_id)
+        state = await storage.get_settings(user_id)
         try:
             await callback.message.edit_text(
                 "⚙️ <b>Параметры чата и ответов:</b>\n\n✅ <i>Вся история диалогов очищена.</i>",

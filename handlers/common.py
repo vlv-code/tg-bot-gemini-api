@@ -790,9 +790,10 @@ async def _execute_inline_generation(
             full_text[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше задавать в личку боту)"
         )
 
-    markup = inline_control_keyboard(session_id) if interactive else None
+    markup = inline_control_keyboard(session_id, author_id=user_id) if interactive else None
 
-    if state.rich_mode and not interactive:
+    # 1. Если включён rich_mode — отправляем через Message Entities (Markdown)
+    if state.rich_mode:
         chunks = markdown_to_chunks(full_text, max_len=INLINE_ANSWER_LIMIT)
         if chunks:
             chunk_text, chunk_entities = chunks[0]
@@ -801,17 +802,43 @@ async def _execute_inline_generation(
                     text=chunk_text,
                     entities=chunk_entities,
                     inline_message_id=inline_message_id,
-                    reply_markup=None,
+                    reply_markup=markup,
                 )
                 return
             except TelegramBadRequest:
                 pass
 
+    # 2. Fallback: безопасный HTML с экранированием контента модели
+    if is_quick:
+        safe_html = html.escape(response.text or "Готово.").strip()
+    else:
+        safe_html = _format_with_prompt_quote(raw_query, html.escape(response.text or "Готово."))
+
+    if utf16_len(safe_html) > INLINE_ANSWER_LIMIT:
+        cut = find_utf16_cut(safe_html, INLINE_ANSWER_LIMIT)
+        safe_html = safe_html[:cut] + "…\n\n(ответ обрезан — длинные вопросы лучше задавать в личку боту)"
+
     try:
         await bot.edit_message_text(
-            text=full_text,
+            text=safe_html,
             inline_message_id=inline_message_id,
             parse_mode="HTML",
+            reply_markup=markup,
+        )
+        return
+    except TelegramBadRequest:
+        pass
+
+    # 3. Финальный fallback: чистый текст без parse_mode (гарантирует отсутствие зависаний)
+    try:
+        plain_text = (response.text or "Готово.").strip()
+        if utf16_len(plain_text) > INLINE_ANSWER_LIMIT:
+            cut = find_utf16_cut(plain_text, INLINE_ANSWER_LIMIT)
+            plain_text = plain_text[:cut] + "…\n\n(ответ обрезан)"
+        await bot.edit_message_text(
+            text=plain_text,
+            inline_message_id=inline_message_id,
+            parse_mode=None,
             reply_markup=markup,
         )
     except TelegramBadRequest:

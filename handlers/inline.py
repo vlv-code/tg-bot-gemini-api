@@ -93,7 +93,7 @@ async def handle_inline(query: InlineQuery) -> None:
             return
 
         result_id = hashlib.sha256(raw_query.encode("utf-8")).hexdigest()[:24]
-        state = await storage.get(user_id)
+        state = await storage.get_settings(user_id)
 
         # 1. Проверяем постоянный кэш в SQLite (0 мс, 0 квоты)
         cached_file_id = await storage.get_cached_tts_voice(
@@ -222,7 +222,7 @@ async def handle_inline(query: InlineQuery) -> None:
         return
 
     # Режимы Avatar и Stand
-    state = await storage.get(user_id)
+    state = await storage.get_settings(user_id)
     personas = await storage.get_all_personas(user_id)
 
     clean_query, matched_persona, intent = _parse_inline_query_intent(raw_query, personas)
@@ -396,6 +396,15 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     )
 
 
+def _extract_callback_author(callback_data: str, session: Optional[InlineSession]) -> Optional[int]:
+    if session:
+        return session.user_id
+    parts = callback_data.split(":")
+    if len(parts) >= 3 and parts[2].isdigit():
+        return int(parts[2])
+    return None
+
+
 @router.callback_query(F.data == "inl_noop")
 async def cb_inl_noop(callback: CallbackQuery) -> None:
     await callback.answer()
@@ -408,6 +417,11 @@ async def cb_inl_start(callback: CallbackQuery) -> None:
     if not session:
         await callback.answer("Сессия устарела. Создайте новый запрос через @bot.", show_alert=True)
         return
+
+    if callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+        await callback.answer("⛔️ Только автор сообщения может запустить генерацию!", show_alert=True)
+        return
+
     await callback.answer("Генерирую... ⏳")
     if callback.inline_message_id:
         _run_background_task(
@@ -422,13 +436,15 @@ async def cb_inl_start(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("inl_regen:"))
 async def cb_inl_regen(callback: CallbackQuery) -> None:
-    session_id = callback.data.split(":", 1)[1]
+    parts = callback.data.split(":")
+    session_id = parts[1]
     session = _inline_sessions.get(session_id)
     if not session:
         await callback.answer("Сессия устарела. Создайте новый запрос через @bot.", show_alert=True)
         return
 
-    if callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+    author_id = _extract_callback_author(callback.data, session)
+    if author_id is not None and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
         await callback.answer("⛔️ Только автор сообщения может управлять генерацией!", show_alert=True)
         return
 
@@ -450,13 +466,15 @@ async def cb_inl_regen(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("inl_style:"))
 async def cb_inl_style(callback: CallbackQuery) -> None:
-    session_id = callback.data.split(":", 1)[1]
+    parts = callback.data.split(":")
+    session_id = parts[1]
     session = _inline_sessions.get(session_id)
     if not session:
         await callback.answer("Сессия устарела. Создайте новый запрос через @bot.", show_alert=True)
         return
 
-    if callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+    author_id = _extract_callback_author(callback.data, session)
+    if author_id is not None and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
         await callback.answer("⛔️ Только автор сообщения может управлять стилем!", show_alert=True)
         return
 
@@ -497,9 +515,11 @@ async def cb_inl_style(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("inl_fix:"))
 async def cb_inl_fix(callback: CallbackQuery) -> None:
-    session_id = callback.data.split(":", 1)[1]
+    parts = callback.data.split(":")
+    session_id = parts[1]
     session = _inline_sessions.get(session_id)
-    if session and callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+    author_id = _extract_callback_author(callback.data, session)
+    if author_id is not None and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
         await callback.answer("⛔️ Только автор сообщения может зафиксировать текст!", show_alert=True)
         return
 
@@ -516,9 +536,11 @@ async def cb_inl_fix(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("inl_del:"))
 async def cb_inl_del(callback: CallbackQuery) -> None:
-    session_id = callback.data.split(":", 1)[1]
+    parts = callback.data.split(":")
+    session_id = parts[1]
     session = _inline_sessions.get(session_id)
-    if session and callback.from_user.id != session.user_id and callback.from_user.id not in settings.admin_ids:
+    author_id = _extract_callback_author(callback.data, session)
+    if author_id is not None and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
         await callback.answer("⛔️ Только автор сообщения может удалить его!", show_alert=True)
         return
 

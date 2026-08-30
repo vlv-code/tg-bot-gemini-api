@@ -305,17 +305,18 @@ def admin_users_keyboard(users: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def inline_control_keyboard(session_id: str) -> InlineKeyboardMarkup:
+def inline_control_keyboard(session_id: str, author_id: Optional[int] = None) -> InlineKeyboardMarkup:
     """Интерактивная панель управления для инлайн-сообщений (перегенерация, смена стиля, фиксация)."""
+    suffix = f":{author_id}" if author_id is not None else ""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🔄 Еще вариант", callback_data=f"inl_regen:{session_id}"),
-                InlineKeyboardButton(text="🎭 Сменить стиль", callback_data=f"inl_style:{session_id}"),
+                InlineKeyboardButton(text="🔄 Еще вариант", callback_data=f"inl_regen:{session_id}{suffix}"),
+                InlineKeyboardButton(text="🎭 Сменить стиль", callback_data=f"inl_style:{session_id}{suffix}"),
             ],
             [
-                InlineKeyboardButton(text="✅ Зафиксировать", callback_data=f"inl_fix:{session_id}"),
-                InlineKeyboardButton(text="❌ Удалить", callback_data=f"inl_del:{session_id}"),
+                InlineKeyboardButton(text="✅ Зафиксировать", callback_data=f"inl_fix:{session_id}{suffix}"),
+                InlineKeyboardButton(text="❌ Удалить", callback_data=f"inl_del:{session_id}{suffix}"),
             ],
         ]
     )

@@ -15,24 +15,14 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-# --- Панель администратора ---
-
-@router.message(Command("admin"))
-async def cmd_admin(message: Message) -> None:
-    user_id = message.from_user.id
-    if not await storage.is_user_admin(user_id):
-        await message.answer("⛔️ У вас нет доступа к панели администратора.")
-        return
-
-    whitelist_enabled = await storage.is_whitelist_enabled()
-    users = await storage.list_allowed_users()
-    token_stats = await storage.get_token_stats()
-
+def _render_admin_panel_text(
+    whitelist_enabled: bool, users: list[dict], token_stats: dict[str, int]
+) -> str:
     wl_status = "ВКЛЮЧЁН 🔒 (доступ только по списку)" if whitelist_enabled else "ВЫКЛЮЧЕН 🌍 (доступ для всех)"
     today_tok = f"{token_stats['today_total']:,}".replace(",", " ")
     all_tok = f"{token_stats['all_total']:,}".replace(",", " ")
 
-    text = (
+    return (
         "👑 <b>Панель управления администратора</b>\n\n"
         f"• <b>Белый список:</b> {wl_status}\n"
         f"• <b>Пользователей в базе:</b> {len(users)}\n"
@@ -44,8 +34,23 @@ async def cmd_admin(message: Message) -> None:
         "• <code>/deluser &lt;id&gt;</code> — удалить из белого списка\n"
         "• <code>/users</code> — список всех пользователей"
     )
+
+
+# --- Панель администратора ---
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    user_id = message.from_user.id
+    if not await storage.is_user_admin(user_id):
+        await message.answer("⛔️ У вас нет доступа к панели администратора.")
+        return
+
+    whitelist_enabled = await storage.get_whitelist_mode()
+    users = await storage.list_allowed_users()
+    token_stats = await storage.get_token_stats()
+
     await message.answer(
-        text,
+        _render_admin_panel_text(whitelist_enabled, users, token_stats),
         parse_mode="HTML",
         reply_markup=admin_panel_keyboard(whitelist_enabled),
     )
@@ -58,29 +63,13 @@ async def cb_menu_admin(callback: CallbackQuery) -> None:
         await callback.answer("⛔️ Нет прав администратора", show_alert=True)
         return
 
-    whitelist_enabled = await storage.is_whitelist_enabled()
+    whitelist_enabled = await storage.get_whitelist_mode()
     users = await storage.list_allowed_users()
     token_stats = await storage.get_token_stats()
 
-    wl_status = "ВКЛЮЧЁН 🔒 (доступ только по списку)" if whitelist_enabled else "ВЫКЛЮЧЕН 🌍 (доступ для всех)"
-    today_tok = f"{token_stats['today_total']:,}".replace(",", " ")
-    all_tok = f"{token_stats['all_total']:,}".replace(",", " ")
-
-    text = (
-        "👑 <b>Панель управления администратора</b>\n\n"
-        f"• <b>Белый список:</b> {wl_status}\n"
-        f"• <b>Пользователей в базе:</b> {len(users)}\n"
-        f"• <b>Расход токенов сегодня (все):</b> <code>{today_tok}</code>\n"
-        f"• <b>Расход токенов всего:</b> <code>{all_tok}</code> ({token_stats['all_requests']} запросов)\n\n"
-        "<b>Команды управления доступом:</b>\n"
-        "• <code>/adduser &lt;id&gt; [username]</code> — добавить пользователя\n"
-        "• <code>/addadmin &lt;id&gt; [username]</code> — назначить администратора\n"
-        "• <code>/deluser &lt;id&gt;</code> — удалить из белого списка\n"
-        "• <code>/users</code> — список всех пользователей"
-    )
     try:
         await callback.message.edit_text(
-            text,
+            _render_admin_panel_text(whitelist_enabled, users, token_stats),
             parse_mode="HTML",
             reply_markup=admin_panel_keyboard(whitelist_enabled),
         )
@@ -96,31 +85,16 @@ async def cb_admin_toggle_whitelist(callback: CallbackQuery) -> None:
         await callback.answer("⛔️ Нет прав администратора", show_alert=True)
         return
 
-    new_state = await storage.toggle_whitelist()
+    new_state = await storage.toggle_whitelist_mode()
     status_str = "включен (доступ ограничен)" if new_state else "выключен (доступ открыт всем)"
     await callback.answer(f"Белый список {status_str} ✅", show_alert=True)
 
     users = await storage.list_allowed_users()
     token_stats = await storage.get_token_stats()
-    wl_status = "ВКЛЮЧЁН 🔒 (доступ только по списку)" if new_state else "ВЫКЛЮЧЕН 🌍 (доступ для всех)"
-    today_tok = f"{token_stats['today_total']:,}".replace(",", " ")
-    all_tok = f"{token_stats['all_total']:,}".replace(",", " ")
 
-    text = (
-        "👑 <b>Панель управления администратора</b>\n\n"
-        f"• <b>Белый список:</b> {wl_status}\n"
-        f"• <b>Пользователей в базе:</b> {len(users)}\n"
-        f"• <b>Расход токенов сегодня (все):</b> <code>{today_tok}</code>\n"
-        f"• <b>Расход токенов всего:</b> <code>{all_tok}</code> ({token_stats['all_requests']} запросов)\n\n"
-        "<b>Команды управления доступом:</b>\n"
-        "• <code>/adduser &lt;id&gt; [username]</code> — добавить пользователя\n"
-        "• <code>/addadmin &lt;id&gt; [username]</code> — назначить администратора\n"
-        "• <code>/deluser &lt;id&gt;</code> — удалить из белого списка\n"
-        "• <code>/users</code> — список всех пользователей"
-    )
     try:
         await callback.message.edit_text(
-            text,
+            _render_admin_panel_text(new_state, users, token_stats),
             parse_mode="HTML",
             reply_markup=admin_panel_keyboard(new_state),
         )
@@ -183,6 +157,10 @@ async def cb_admin_del_user(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("admin:user_info:"))
 async def cb_admin_user_info(callback: CallbackQuery) -> None:
+    if not await storage.is_user_admin(callback.from_user.id):
+        await callback.answer("⛔️ Нет прав администратора", show_alert=True)
+        return
+
     target_uid_str = callback.data.split(":", 2)[2]
     try:
         target_uid = int(target_uid_str)

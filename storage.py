@@ -614,39 +614,66 @@ class UserStorage:
         )
         await db.commit()
 
-    async def get_token_stats(self, user_id: int) -> dict[str, int]:
-        """Возвращает агрегированную статистику токенов за сегодня и за всё время."""
+    async def get_token_stats(self, user_id: Optional[int] = None) -> dict[str, int]:
+        """Возвращает агрегированную статистику токенов за сегодня и за всё время.
+        
+        Если user_id is None, возвращает суммарную статистику по всем пользователям (для админ-панели).
+        """
         db = await self._ensure_db()
 
-        # Статистика за сегодня
-        cursor = await db.execute(
-            """
-            SELECT 
-                COALESCE(SUM(prompt_tokens), 0) as today_prompt,
-                COALESCE(SUM(candidates_tokens), 0) as today_candidates,
-                COALESCE(SUM(total_tokens), 0) as today_total,
-                COUNT(*) as today_requests
-            FROM token_usage
-            WHERE user_id = ? AND date(created_at) = date('now')
-            """,
-            (user_id,),
-        )
-        today_row = await cursor.fetchone()
+        if user_id is None:
+            cursor = await db.execute(
+                """
+                SELECT 
+                    COALESCE(SUM(prompt_tokens), 0) as today_prompt,
+                    COALESCE(SUM(candidates_tokens), 0) as today_candidates,
+                    COALESCE(SUM(total_tokens), 0) as today_total,
+                    COUNT(*) as today_requests
+                FROM token_usage
+                WHERE date(created_at) = date('now')
+                """
+            )
+            today_row = await cursor.fetchone()
 
-        # Статистика за всё время
-        cursor = await db.execute(
-            """
-            SELECT 
-                COALESCE(SUM(prompt_tokens), 0) as all_prompt,
-                COALESCE(SUM(candidates_tokens), 0) as all_candidates,
-                COALESCE(SUM(total_tokens), 0) as all_total,
-                COUNT(*) as all_requests
-            FROM token_usage
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        )
-        all_row = await cursor.fetchone()
+            cursor = await db.execute(
+                """
+                SELECT 
+                    COALESCE(SUM(prompt_tokens), 0) as all_prompt,
+                    COALESCE(SUM(candidates_tokens), 0) as all_candidates,
+                    COALESCE(SUM(total_tokens), 0) as all_total,
+                    COUNT(*) as all_requests
+                FROM token_usage
+                """
+            )
+            all_row = await cursor.fetchone()
+        else:
+            cursor = await db.execute(
+                """
+                SELECT 
+                    COALESCE(SUM(prompt_tokens), 0) as today_prompt,
+                    COALESCE(SUM(candidates_tokens), 0) as today_candidates,
+                    COALESCE(SUM(total_tokens), 0) as today_total,
+                    COUNT(*) as today_requests
+                FROM token_usage
+                WHERE user_id = ? AND date(created_at) = date('now')
+                """,
+                (user_id,),
+            )
+            today_row = await cursor.fetchone()
+
+            cursor = await db.execute(
+                """
+                SELECT 
+                    COALESCE(SUM(prompt_tokens), 0) as all_prompt,
+                    COALESCE(SUM(candidates_tokens), 0) as all_candidates,
+                    COALESCE(SUM(total_tokens), 0) as all_total,
+                    COUNT(*) as all_requests
+                FROM token_usage
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            )
+            all_row = await cursor.fetchone()
 
         return {
             "today_prompt": int(today_row["today_prompt"]) if today_row else 0,
@@ -658,6 +685,10 @@ class UserStorage:
             "all_total": int(all_row["all_total"]) if all_row else 0,
             "all_requests": int(all_row["all_requests"]) if all_row else 0,
         }
+
+    # Алиасы для обратной совместимости
+    is_whitelist_enabled = get_whitelist_mode
+    toggle_whitelist = toggle_whitelist_mode
 
     @staticmethod
     def _make_tts_cache_key(text: str, voice: str, model: str) -> str:

@@ -41,7 +41,7 @@ router = Router()
 async def cmd_prompts(message: Message) -> None:
     """Каталог пресетов и сохранённых промптов Stand-режима."""
     user_id = message.from_user.id
-    state = await storage.get(user_id, chat_id=message.chat.id)
+    state = await storage.get_settings(user_id)
     presets = await storage.get_all_stand_presets(user_id)
     current_prompt = state.system_prompt or settings.system_prompt or ""
     await message.answer(
@@ -54,7 +54,7 @@ async def cmd_prompts(message: Message) -> None:
 @router.message(Command("prompt"))
 async def cmd_prompt(message: Message) -> None:
     user_id = message.from_user.id
-    state = await storage.get(user_id, chat_id=message.chat.id)
+    state = await storage.get_settings(user_id)
     args = message.text.split(maxsplit=1)
 
     if len(args) == 1:
@@ -113,7 +113,7 @@ async def cmd_prompt(message: Message) -> None:
 async def cmd_avatar(message: Message) -> None:
     """Управление Личностями Аватара (/q)."""
     user_id = message.from_user.id
-    state = await storage.get(user_id, chat_id=message.chat.id)
+    state = await storage.get_settings(user_id)
     args = message.text.split(maxsplit=1)
 
     if len(args) == 1:
@@ -173,7 +173,7 @@ async def cmd_avatar(message: Message) -> None:
 @router.message(Command("qprompt", "prompt_q"))
 async def cmd_qprompt(message: Message) -> None:
     user_id = message.from_user.id
-    state = await storage.get(user_id, chat_id=message.chat.id)
+    state = await storage.get_settings(user_id)
     args = message.text.split(maxsplit=1)
 
     if len(args) == 1:
@@ -221,7 +221,7 @@ async def cmd_qprompt(message: Message) -> None:
 @router.callback_query(F.data == "menu:prompt")
 async def cb_menu_prompt(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             _render_prompt_menu_text(state),
@@ -237,7 +237,7 @@ async def cb_menu_prompt(callback: CallbackQuery) -> None:
 async def cb_reset_prompt(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     await storage.set_system_prompt(callback.from_user.id, "")
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             _render_prompt_menu_text(state),
@@ -252,7 +252,7 @@ async def cb_reset_prompt(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "menu:qprompt")
 async def cb_menu_qprompt(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             _render_qprompt_menu_text(state),
@@ -268,7 +268,7 @@ async def cb_menu_qprompt(callback: CallbackQuery) -> None:
 async def cb_reset_qprompt(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     await storage.set_quick_prompt(callback.from_user.id, "")
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
             _render_qprompt_menu_text(state),
@@ -283,7 +283,7 @@ async def cb_reset_qprompt(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "menu:personas")
 async def cb_menu_personas(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     personas = await storage.get_all_personas(callback.from_user.id)
     pinned_ids = await storage.get_pinned_persona_ids(callback.from_user.id)
     current_prompt = state.quick_prompt or settings.quick_prompt
@@ -303,7 +303,7 @@ async def cb_persona_info(callback: CallbackQuery) -> None:
     persona_id = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
     if not persona:
         await callback.answer("Личность не найдена", show_alert=True)
@@ -337,7 +337,7 @@ async def cb_persona_pin(callback: CallbackQuery) -> None:
     persona_id = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
     if not persona:
         await callback.answer("Личность не найдена", show_alert=True)
@@ -382,7 +382,7 @@ async def cb_persona_set(callback: CallbackQuery) -> None:
     await callback.answer(f"Личность «{title}» активирована! 🎭", show_alert=True)
 
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     personas = await storage.get_all_personas(user_id)
     pinned_ids = await storage.get_pinned_persona_ids(user_id)
     try:
@@ -411,7 +411,7 @@ async def cb_persona_del(callback: CallbackQuery) -> None:
         await callback.answer("Не удалось удалить личность ❌", show_alert=True)
 
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     personas = await storage.get_all_personas(user_id)
     pinned_ids = await storage.get_pinned_persona_ids(user_id)
     current_prompt = state.quick_prompt or settings.quick_prompt
@@ -495,7 +495,7 @@ async def cb_persona_guide(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "menu:prompts")
 async def cb_menu_prompts(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    state = await storage.get(callback.from_user.id, chat_id=chat_id)
+    state = await storage.get_settings(callback.from_user.id)
     presets = await storage.get_all_stand_presets(callback.from_user.id)
     current_prompt = state.system_prompt or settings.system_prompt or ""
     try:
@@ -514,7 +514,7 @@ async def cb_stand_info(callback: CallbackQuery) -> None:
     preset_id = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     preset = await storage.find_stand_preset_by_name_or_id(user_id, preset_id)
     if not preset:
         await callback.answer("Промпт не найден", show_alert=True)
@@ -555,7 +555,7 @@ async def cb_stand_set(callback: CallbackQuery) -> None:
     await callback.answer(f"Промпт «{title}» активирован! 🥊", show_alert=True)
 
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     presets = await storage.get_all_stand_presets(user_id)
     try:
         await callback.message.edit_text(
@@ -611,7 +611,7 @@ async def cb_stand_del(callback: CallbackQuery) -> None:
         await callback.answer("Не удалось удалить промпт ❌", show_alert=True)
 
     chat_id = callback.message.chat.id if callback.message else user_id
-    state = await storage.get(user_id, chat_id=chat_id)
+    state = await storage.get_settings(user_id)
     presets = await storage.get_all_stand_presets(user_id)
     current_prompt = state.system_prompt or settings.system_prompt or ""
     try:

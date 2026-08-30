@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Скрипт для создания горячего онлайн-бэкапа SQLite базы данных бота.
 
 Использует команду SQLite VACUUM INTO, которая гарантирует консистентность
@@ -13,7 +13,7 @@ import sys
 
 
 def backup_database(
-    db_path: str = "data/bot.db", backup_dir: str = "backups", keep_days: int = 30
+    db_path: str = "data/bot.db", backup_dir: str = "data/backups", keep_days: int = 30
 ) -> str:
     if not os.path.exists(db_path):
         print(f"Ошибка: файл базы данных не найден: {db_path}", file=sys.stderr)
@@ -68,7 +68,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--backup-dir",
-        default="backups",
+        default=os.getenv("BACKUP_DIR", "data/backups"),
         help="Директория для сохранения бэкапов",
     )
     parser.add_argument(

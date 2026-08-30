@@ -207,16 +207,60 @@ tg-bot-gemini-api/
 ├── bot.py              # Точка входа, регистрация команд и запуск aiogram polling
 ├── config.py           # Валидация и загрузка настроек из .env
 ├── formatting.py       # Rich Markdown парсер и безопасное разбиение по UTF-16 code units
-├── gemini_client.py    # Асинхронный клиент Google GenAI SDK (текст, vision, audio, TTS)
-├── handlers.py         # Обработчики команд, сообщений, инлайн-запросов и меню
+├── gemini_client.py    # Асинхронный клиент Google GenAI SDK (текст, vision, audio, TTS, таймауты)
+├── handlers/           # Модульная маршрутизация событий
+│   ├── __init__.py     # Сборка роутеров
+│   ├── common.py       # Общие состояния, кэш инлайн-сессий и рендеринг
+│   ├── menu.py         # Главное меню, модели, TTS и настройки
+│   ├── prompts.py      # Управление пресетами Stand и личностями Аватара
+│   ├── admin.py        # Панель администратора и управление белым списком
+│   ├── chat.py         # Обработка текстовых, голосовых и мультимодальных сообщений
+│   └── inline.py       # Инлайн-режим карточек, интерактивная панель действий
 ├── keyboards.py        # Интерактивные inline-клавиатуры для навигации
 ├── locks.py            # Асинхронные блокировки и очередь запросов с приоритетами
 ├── middlewares.py      # Middleware контроля доступа и белого списка
 ├── rate_limiter.py     # Рейт-лимитер со скользящим окном (RPM и RPD)
 ├── storage.py          # Асинхронное хранилище SQLite (aiosqlite WAL) с разделением mode
+├── scripts/
+│   └── backup_db.py    # Горячий онлайн-бэкап SQLite (VACUUM INTO) с ротацией
+├── tests/              # Набор модульных тестов (хэндлеры, безопасность, блокировки, БД)
 ├── Dockerfile          # Оптимизированный multi-stage Dockerfile
 ├── docker-compose.yml  # Манифест Docker Compose с пробросом volumes
 └── requirements.txt    # Зависимости проекта
+```
+
+---
+
+## 💾 Резервное копирование базы данных
+
+Для создания безопасного онлайн-бэкапа SQLite базы данных без остановки бота используется скрипт `scripts/backup_db.py` (выполняет команду `VACUUM INTO`, гарантирующую консистентность даже при активных транзакциях в WAL-режиме):
+
+```bash
+# Ручной запуск бэкапа (сохраняет в data/backups/ с ротацией 30 дней)
+python scripts/backup_db.py
+
+# С кастомными параметрами:
+python scripts/backup_db.py --db data/bot.db --backup-dir data/backups --keep-days 14
+```
+
+### Автоматизация через Cron (Linux):
+Добавьте задачу в `crontab -e` для ежедневного создания бэкапа в 03:00 ночи:
+```bash
+0 3 * * * cd /path/to/tg-bot-gemini-api && .venv/bin/python scripts/backup_db.py >> /var/log/bot_backup.log 2>&1
+```
+
+---
+
+## 🧪 Запуск тестов
+
+Проект покрыт автоматическими тестами:
+
+```bash
+# Запуск через pytest:
+pytest -v
+
+# Либо через стандартный модуль unittest:
+python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 ---

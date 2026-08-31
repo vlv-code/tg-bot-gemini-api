@@ -62,6 +62,12 @@ class PendingDraft:
     chat_id: int
     owner_user_id: int
     draft_text: str
+    incoming_text: str = ""
+    counterparty_name: str = "Собеседник"
+    hint_texts: list = field(default_factory=list)
+    persona_id: Optional[object] = None
+    persona_name: str = ""
+    persona_prompt: str = ""
     created_at: float = field(default_factory=time.time)
 
 
@@ -83,9 +89,15 @@ def _build_secretary_prompt(
     user_system_prompt: str,
     facts: Optional[list[dict]] = None,
     hints: Optional[list[str]] = None,
+    persona_style: Optional[str] = None,
 ) -> str:
     """Системный промпт для Secretary Mode: ответ уходит реальному человеку в личной
-    переписке владельца, поэтому рамки строже, чем в обычном чате с ботом."""
+    переписке владельца, поэтому рамки строже, чем в обычном чате с ботом.
+
+    persona_style — это ТОЛЬКО текст личности из Avatar (`persona.prompt`, описание
+    характера/тона), а не инструкция-суфлёр Avatar-режима («это твой черновик, отполируй
+    его»). Та инструкция тут не участвует вообще — Secretary Mode отвечает на сообщение
+    КЛИЕНТА, а не полирует черновик владельца, поэтому у него отдельная, своя рамка ниже."""
     base = (
         "You are acting as the personal secretary/assistant for the Telegram account owner, "
         "replying directly to a real person in the owner's private chat. "
@@ -97,6 +109,9 @@ def _build_secretary_prompt(
         "holding reply instead of guessing or inventing facts."
     )
     parts = [base]
+
+    if persona_style and persona_style.strip():
+        parts.append(f"VOICE/PERSONALITY FOR THIS REPLY (write in this character's tone):\n{persona_style.strip()}")
 
     if user_system_prompt and user_system_prompt.strip():
         parts.append(f"OWNER'S PREFERRED TONE/STYLE:\n{user_system_prompt.strip()}")
@@ -116,6 +131,88 @@ def _build_secretary_prompt(
         )
 
     return "\n\n".join(parts)
+
+
+async def _generate_secretary_reply(
+    owner_user_id: int,
+    chat_id: int,
+    incoming_text: str,
+    hint_texts: list,
+    persona_prompt: str = "",
+    jitter: bool = False,
+):
+    """Общий путь генерации ответа Gemini для Secretary Mode: используется и для первого
+    черновика, и для перегенерации/смены стиля по кнопке. НЕ пишет в историю — это делает
+    вызывающий код в момент, когда ответ реально уходит собеседнику (send/auto-reply),
+    чтобы отклонённые/перегенерированные черновики не засоряли историю переписки.
+
+    Возвращает (response, state); response is None при ошибке/исчерпанном лимите."""
+    async with user_locks.get(owner_user_id):
+        limit_status = await limiter.check(owner_user_id)
+        if not limit_status.allowed:
+            logger.info(
+                "Secretary Mode: лимит запросов исчерпан для владельца %s при генерации ответа для чата %s",
+                owner_user_id, chat_id,
+            )
+            return None, None
+
+        priority = await _get_user_priority(owner_user_id)
+
+        async with global_queue.acquire(owner_user_id, priority=priority):
+            state = await storage.get(owner_user_id, chat_id=chat_id, mode="business")
+            facts = await storage.get_business_facts(owner_user_id)
+            effective_prompt = _build_secretary_prompt(
+                state.system_prompt or settings.system_prompt,
+                facts=facts,
+                hints=hint_texts,
+                persona_style=persona_prompt,
+            )
+
+            message_input = incoming_text
+            if jitter:
+                message_input = (
+                    f"{incoming_text}\n\n"
+                    "[SYSTEM NOTE: the owner asked for another, genuinely different variation "
+                    "of the reply — do not just lightly reword the previous attempt, change the "
+                    "approach/phrasing meaningfully.]"
+                )
+
+            try:
+                response = await gemini_client.ask(
+                    model=state.model,
+                    history_turns=state.history,
+                    message=message_input,
+                    system_prompt=effective_prompt,
+                    want_audio=False,
+                )
+            except GeminiError as exc:
+                logger.warning("Secretary Mode: ошибка Gemini для владельца %s: %s", owner_user_id, exc)
+                return None, state
+            except Exception:
+                logger.exception("Secretary Mode: непредвиденная ошибка при обращении к Gemini API")
+                return None, state
+
+            await limiter.hit(owner_user_id)
+            if response.total_tokens > 0:
+                await storage.record_token_usage(
+                    user_id=owner_user_id,
+                    chat_id=chat_id,
+                    model=state.model,
+                    prompt_tokens=response.prompt_tokens,
+                    candidates_tokens=response.candidates_tokens,
+                    total_tokens=response.total_tokens,
+                )
+            return response, state
+
+
+def _render_draft_preview(draft: "PendingDraft") -> str:
+    preview_incoming = draft.incoming_text[:300] + ("…" if len(draft.incoming_text) > 300 else "")
+    style_line = f"\n🎭 <i>Стиль: {html.escape(draft.persona_name)}</i>" if draft.persona_name else ""
+    return (
+        f"✉️ <b>Черновик ответа для «{html.escape(draft.counterparty_name)}»:</b>{style_line}\n\n"
+        f"<blockquote>{html.escape(preview_incoming)}</blockquote>\n\n"
+        f"{html.escape(draft.draft_text)}"
+    )
 
 
 def _match_keyword_rules(rules: list[dict], text: str) -> list[dict]:
@@ -260,6 +357,17 @@ async def on_business_message(message: Message, bot: Bot) -> None:
 
     owner_user_id = connection["owner_user_id"]
 
+    # Доп. проверка авторизации: business_connection мог быть создан, пока владелец
+    # был в вайтлисте, а потом его оттуда убрали (забанили/отозвали доступ). Сам
+    # AccessMiddleware это не ловит — он для business_message сознательно не проверяет
+    # автора (это клиент, а не владелец), поэтому ревокацию нужно перепроверять здесь.
+    if not await storage.is_user_allowed(owner_user_id):
+        logger.info(
+            "Secretary Mode: владелец %s подключения %s больше не в вайтлисте, сообщение проигнорировано",
+            owner_user_id, business_connection_id,
+        )
+        return
+
     # Сообщения, которые владелец отправил сам через свой обычный клиент Telegram,
     # тоже прилетают как business_message — не отвечаем на них, иначе бот начнёт
     # реагировать на собственные реплики владельца.
@@ -293,86 +401,40 @@ async def on_business_message(message: Message, bot: Bot) -> None:
 
     hint_texts = [r["content"] for r in matched_rules if r["rule_type"] == "hint"]
 
-    response = None
-    state = None
+    # user-реплика фиксируется сразу (клиент её реально отправил), а вот model-реплику
+    # пишем в историю только когда ответ РЕАЛЬНО уходит (send/auto-reply) — иначе
+    # отклонённые и перегенерированные черновики засоряли бы историю фантомными репликами.
+    await storage.add_turn(owner_user_id, "user", incoming_text, chat_id=chat_id, mode="business")
 
-    async with user_locks.get(owner_user_id):
-        limit_status = await limiter.check(owner_user_id)
-        if not limit_status.allowed:
-            # Владелец исчерпал личный лимит запросов — молча пропускаем сообщение,
-            # а не будим его алертом об ошибке на каждое чужое входящее.
-            logger.info(
-                "Secretary Mode: лимит запросов исчерпан для владельца %s, сообщение из чата %s пропущено",
-                owner_user_id, chat_id,
-            )
-            return
-
-        priority = await _get_user_priority(owner_user_id)
-
-        async with global_queue.acquire(owner_user_id, priority=priority):
-            state = await storage.get(owner_user_id, chat_id=chat_id, mode="business")
-            facts = await storage.get_business_facts(owner_user_id)
-            effective_prompt = _build_secretary_prompt(
-                state.system_prompt or settings.system_prompt, facts=facts, hints=hint_texts
-            )
-
-            try:
-                response = await gemini_client.ask(
-                    model=state.model,
-                    history_turns=state.history,
-                    message=incoming_text,
-                    system_prompt=effective_prompt,
-                    want_audio=False,
-                )
-            except GeminiError as exc:
-                logger.warning("Secretary Mode: ошибка Gemini для владельца %s: %s", owner_user_id, exc)
-                return
-            except Exception:
-                logger.exception("Secretary Mode: непредвиденная ошибка при обращении к Gemini API")
-                return
-
-            await limiter.hit(owner_user_id)
-            await storage.add_turn(owner_user_id, "user", incoming_text, chat_id=chat_id, mode="business")
-            if response.text:
-                await storage.add_turn(owner_user_id, "model", response.text, chat_id=chat_id, mode="business")
-            if response.total_tokens > 0:
-                await storage.record_token_usage(
-                    user_id=owner_user_id,
-                    chat_id=chat_id,
-                    model=state.model,
-                    prompt_tokens=response.prompt_tokens,
-                    candidates_tokens=response.candidates_tokens,
-                    total_tokens=response.total_tokens,
-                )
+    response, state = await _generate_secretary_reply(owner_user_id, chat_id, incoming_text, hint_texts)
 
     if response is None or not response.text:
         return
 
     auto_reply = await storage.is_auto_reply_enabled(business_connection_id, chat_id)
     if auto_reply:
+        await storage.add_turn(owner_user_id, "model", response.text, chat_id=chat_id, mode="business")
         await _send_business_reply(message, response.text, state.rich_mode)
         return
 
     _cleanup_pending_drafts()
     draft_id = secrets.token_urlsafe(6)
-    _pending_drafts[draft_id] = PendingDraft(
+    draft = PendingDraft(
         draft_id=draft_id,
         business_connection_id=business_connection_id,
         chat_id=chat_id,
         owner_user_id=owner_user_id,
         draft_text=response.text,
+        incoming_text=incoming_text,
+        counterparty_name=counterparty_name,
+        hint_texts=hint_texts,
     )
+    _pending_drafts[draft_id] = draft
 
-    preview_incoming = incoming_text[:300] + ("…" if len(incoming_text) > 300 else "")
-    preview = (
-        f"✉️ <b>Черновик ответа для «{html.escape(counterparty_name)}»:</b>\n\n"
-        f"<blockquote>{html.escape(preview_incoming)}</blockquote>\n\n"
-        f"{html.escape(response.text)}"
-    )
     try:
         await bot.send_message(
             chat_id=connection["user_chat_id"],
-            text=preview,
+            text=_render_draft_preview(draft),
             parse_mode="HTML",
             reply_markup=business_draft_keyboard(draft_id),
         )
@@ -419,6 +481,7 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
                 "⚠️ Не удалось отправить — возможно, чат неактивен более 24ч.", show_alert=True
             )
             return
+        await storage.add_turn(draft.owner_user_id, "model", draft.draft_text, chat_id=draft.chat_id, mode="business")
         _pending_drafts.pop(draft_id, None)
         try:
             await callback.message.edit_text("✅ Отправлено собеседнику.")
@@ -435,6 +498,9 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
                 text=draft.draft_text,
                 business_connection_id=draft.business_connection_id,
             )
+            await storage.add_turn(
+                draft.owner_user_id, "model", draft.draft_text, chat_id=draft.chat_id, mode="business"
+            )
             note = "Черновик отправлен, "
         except Exception as exc:
             logger.warning("Не удалось отправить черновик при включении авто-ответа: %s", exc)
@@ -447,6 +513,83 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
         except TelegramBadRequest:
             pass
         await callback.answer()
+        return
+
+    if action == "regen":
+        await callback.answer("Генерирую новый вариант... ⏳")
+        response, _ = await _generate_secretary_reply(
+            draft.owner_user_id, draft.chat_id, draft.incoming_text, draft.hint_texts,
+            persona_prompt=draft.persona_prompt, jitter=True,
+        )
+        if response is None or not response.text:
+            try:
+                await callback.message.edit_text(
+                    _render_draft_preview(draft) + "\n\n⚠️ <i>Не удалось сгенерировать новый вариант "
+                    "(лимит запросов или ошибка Gemini). Черновик оставлен как есть.</i>",
+                    parse_mode="HTML",
+                    reply_markup=business_draft_keyboard(draft_id),
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        draft.draft_text = response.text
+        draft.created_at = time.time()
+        try:
+            await callback.message.edit_text(
+                _render_draft_preview(draft), parse_mode="HTML",
+                reply_markup=business_draft_keyboard(draft_id),
+            )
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "style":
+        personas = await storage.get_all_personas(draft.owner_user_id)
+        if not personas:
+            await callback.answer(
+                "Список личностей Avatar пуст. Добавить: команда /avatar.", show_alert=True
+            )
+            return
+
+        current_idx = -1
+        for idx, p in enumerate(personas):
+            if str(p["id"]) == str(draft.persona_id):
+                current_idx = idx
+                break
+        next_p = personas[(current_idx + 1) % len(personas)]
+        next_title = next_p.get("title") or f"🎭 {next_p['name']}"
+
+        draft.persona_id = next_p["id"]
+        draft.persona_name = next_title
+        draft.persona_prompt = next_p["prompt"]
+
+        await callback.answer(f"Стиль изменён на: {next_title} 🎭 Генерирую...")
+        response, _ = await _generate_secretary_reply(
+            draft.owner_user_id, draft.chat_id, draft.incoming_text, draft.hint_texts,
+            persona_prompt=draft.persona_prompt,
+        )
+        if response is None or not response.text:
+            try:
+                await callback.message.edit_text(
+                    _render_draft_preview(draft) + "\n\n⚠️ <i>Не удалось сгенерировать в новом стиле "
+                    "(лимит запросов или ошибка Gemini). Черновик оставлен как есть.</i>",
+                    parse_mode="HTML",
+                    reply_markup=business_draft_keyboard(draft_id),
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        draft.draft_text = response.text
+        draft.created_at = time.time()
+        try:
+            await callback.message.edit_text(
+                _render_draft_preview(draft), parse_mode="HTML",
+                reply_markup=business_draft_keyboard(draft_id),
+            )
+        except TelegramBadRequest:
+            pass
         return
 
     await callback.answer()

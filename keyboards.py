@@ -352,6 +352,12 @@ def business_draft_keyboard(draft_id: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Отправить", callback_data=f"biz_draft:send:{draft_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Ещё вариант", callback_data=f"biz_draft:regen:{draft_id}"),
+                InlineKeyboardButton(text="🎭 Сменить стиль", callback_data=f"biz_draft:style:{draft_id}"),
+            ],
+            [
                 InlineKeyboardButton(text="🗑 Отклонить", callback_data=f"biz_draft:discard:{draft_id}"),
             ],
             [

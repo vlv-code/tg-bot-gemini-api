@@ -2,7 +2,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:FAKE_TOKEN_FOR_TESTS")
 os.environ.setdefault("GEMINI_API_KEY", "FAKE_KEY_FOR_TESTS")
@@ -58,6 +58,11 @@ class TestSecretaryModeFlow(unittest.IsolatedAsyncioTestCase):
         biz.storage._db = None
         await biz.storage.init_db()
         biz._pending_drafts.clear()
+        # limiter/global_queue — модульные синглтоны в handlers.common, общие для
+        # всех тестов файла; сбрасываем состояние OWNER_ID, иначе к концу файла
+        # накопленные хиты по одному и тому же user_id исчерпывают per-minute лимит
+        biz.limiter._minute_hits.pop(OWNER_ID, None)
+        biz.limiter._day_hits.pop(OWNER_ID, None)
 
     async def asyncTearDown(self):
         await biz.storage.close()
@@ -192,6 +197,22 @@ class TestSecretaryModeFlow(unittest.IsolatedAsyncioTestCase):
         incoming.answer.assert_not_awaited()
         bot.send_message.assert_not_awaited()
 
+    async def test_owner_removed_from_whitelist_after_connecting_is_blocked(self):
+        """Defense-in-depth: business_connection мог быть создан, пока владелец был
+        в вайтлисте, а потом его оттуда убрали — Secretary Mode должен это уважать,
+        хотя AccessMiddleware для business_message клиента такое не ловит."""
+        await biz.on_business_connection(_fake_connection_event(), _fake_bot())
+        biz.gemini_client.ask = AsyncMock(side_effect=AssertionError("не должен вызываться"))
+
+        bot = _fake_bot()
+        incoming = _fake_business_message("Здравствуйте", from_user_id=222222)
+        with patch.object(biz.storage, "is_user_allowed", AsyncMock(return_value=False)):
+            await biz.on_business_message(incoming, bot)
+
+        incoming.answer.assert_not_awaited()
+        bot.send_message.assert_not_awaited()
+        self.assertEqual(len(biz._pending_drafts), 0)
+
     # --- Ключевые слова и факты о бизнесе ---
 
     async def test_template_keyword_bypasses_gemini_entirely(self):
@@ -316,6 +337,133 @@ class TestSecretaryModeFlow(unittest.IsolatedAsyncioTestCase):
         cb.message.edit_text.assert_awaited()
         rendered_text = cb.message.edit_text.await_args.args[0]
         self.assertIn("Адрес", rendered_text)
+
+    # --- Перегенерация и смена стиля черновика ---
+
+    async def test_regenerate_updates_same_draft_with_jitter_hint(self):
+        await biz.on_business_connection(_fake_connection_event(), _fake_bot())
+        biz.gemini_client.ask = AsyncMock(
+            return_value=GeminiResponse(text="Первый вариант", total_tokens=5)
+        )
+        await biz.on_business_message(
+            _fake_business_message("Какой у вас график?", from_user_id=222222), _fake_bot()
+        )
+        draft_id = next(iter(biz._pending_drafts))
+        self.assertEqual(biz._pending_drafts[draft_id].draft_text, "Первый вариант")
+
+        captured = {}
+
+        async def fake_ask(**kwargs):
+            captured.update(kwargs)
+            return GeminiResponse(text="Второй, другой вариант", total_tokens=6)
+
+        biz.gemini_client.ask = AsyncMock(side_effect=fake_ask)
+        bot = _fake_bot()
+        fake_msg = MagicMock(edit_text=AsyncMock())
+        cb = _fake_callback(OWNER_ID, f"biz_draft:regen:{draft_id}", fake_msg)
+        await biz.cb_business_draft(cb, bot)
+
+        # Тот же draft_id, но текст обновился — новый черновик не создаётся
+        self.assertIn(draft_id, biz._pending_drafts)
+        self.assertEqual(biz._pending_drafts[draft_id].draft_text, "Второй, другой вариант")
+        self.assertIn("SYSTEM NOTE", captured["message"])
+        fake_msg.edit_text.assert_awaited()
+
+    async def test_style_button_cycles_persona_and_regenerates(self):
+        await biz.on_business_connection(_fake_connection_event(), _fake_bot())
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Черновик", total_tokens=5))
+        await biz.on_business_message(
+            _fake_business_message("Вопрос", from_user_id=222222), _fake_bot()
+        )
+        draft_id = next(iter(biz._pending_drafts))
+        self.assertEqual(biz._pending_drafts[draft_id].persona_name, "")  # изначально без стиля
+
+        captured = {}
+
+        async def fake_ask(**kwargs):
+            captured.update(kwargs)
+            return GeminiResponse(text="Ответ в стиле", total_tokens=6)
+
+        biz.gemini_client.ask = AsyncMock(side_effect=fake_ask)
+        cb = _fake_callback(OWNER_ID, f"biz_draft:style:{draft_id}")
+        await biz.cb_business_draft(cb, _fake_bot())
+
+        draft = biz._pending_drafts[draft_id]
+        self.assertNotEqual(draft.persona_name, "")
+        self.assertEqual(draft.draft_text, "Ответ в стиле")
+        # Стиль личности (её prompt) должен попасть в system_prompt, а не инструкция-суфлёр Avatar
+        self.assertIn("VOICE/PERSONALITY", captured["system_prompt"])
+        self.assertNotIn("GHOSTWRITER", captured["system_prompt"])
+
+    async def test_style_button_cycles_through_different_personas_on_repeat_taps(self):
+        await biz.on_business_connection(_fake_connection_event(), _fake_bot())
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Черновик", total_tokens=5))
+        await biz.on_business_message(
+            _fake_business_message("Вопрос", from_user_id=222222), _fake_bot()
+        )
+        draft_id = next(iter(biz._pending_drafts))
+
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Ответ 1", total_tokens=5))
+        await biz.cb_business_draft(_fake_callback(OWNER_ID, f"biz_draft:style:{draft_id}"), _fake_bot())
+        first_persona = biz._pending_drafts[draft_id].persona_id
+
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Ответ 2", total_tokens=5))
+        await biz.cb_business_draft(_fake_callback(OWNER_ID, f"biz_draft:style:{draft_id}"), _fake_bot())
+        second_persona = biz._pending_drafts[draft_id].persona_id
+
+        self.assertNotEqual(first_persona, second_persona)
+
+    async def test_regenerate_and_style_only_owner_allowed(self):
+        await biz.on_business_connection(_fake_connection_event(), _fake_bot())
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Черновик", total_tokens=5))
+        await biz.on_business_message(
+            _fake_business_message("Вопрос", from_user_id=222222), _fake_bot()
+        )
+        draft_id = next(iter(biz._pending_drafts))
+        original_text = biz._pending_drafts[draft_id].draft_text
+
+        stranger_cb = _fake_callback(999999, f"biz_draft:regen:{draft_id}")
+        await biz.cb_business_draft(stranger_cb, _fake_bot())
+        stranger_cb.answer.assert_awaited_with("Это не ваш черновик.", show_alert=True)
+        self.assertEqual(biz._pending_drafts[draft_id].draft_text, original_text)
+
+    # --- История не засоряется отклонёнными/перегенерированными черновиками ---
+
+    async def test_discarded_draft_does_not_pollute_history(self):
+        await biz.on_business_connection(_fake_connection_event(), _fake_bot())
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Черновик", total_tokens=5))
+        await biz.on_business_message(
+            _fake_business_message("Вопрос", from_user_id=222222), _fake_bot()
+        )
+        draft_id = next(iter(biz._pending_drafts))
+
+        cb = _fake_callback(OWNER_ID, f"biz_draft:discard:{draft_id}")
+        await biz.cb_business_draft(cb, _fake_bot())
+
+        state = await biz.storage.get(OWNER_ID, chat_id=CLIENT_CHAT_ID, mode="business")
+        roles = [t.role for t in state.history]
+        self.assertEqual(roles, ["user"])  # только реплика клиента, ответа модели в истории нет
+
+    async def test_regenerated_then_sent_draft_writes_only_final_text_to_history(self):
+        await biz.on_business_connection(_fake_connection_event(), _fake_bot())
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Черновик v1", total_tokens=5))
+        await biz.on_business_message(
+            _fake_business_message("Вопрос", from_user_id=222222), _fake_bot()
+        )
+        draft_id = next(iter(biz._pending_drafts))
+
+        biz.gemini_client.ask = AsyncMock(return_value=GeminiResponse(text="Черновик v2 (финальный)", total_tokens=5))
+        await biz.cb_business_draft(
+            _fake_callback(OWNER_ID, f"biz_draft:regen:{draft_id}"), _fake_bot()
+        )
+
+        bot = _fake_bot()
+        await biz.cb_business_draft(_fake_callback(OWNER_ID, f"biz_draft:send:{draft_id}"), bot)
+
+        state = await biz.storage.get(OWNER_ID, chat_id=CLIENT_CHAT_ID, mode="business")
+        model_turns = [t.text for t in state.history if t.role == "model"]
+        # В истории должен быть только финальный (перегенерированный) вариант, не оба
+        self.assertEqual(model_turns, ["Черновик v2 (финальный)"])
 
 
 if __name__ == "__main__":

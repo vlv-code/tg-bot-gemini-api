@@ -15,6 +15,9 @@ import aiosqlite
 
 from config import settings
 
+MAX_BUSINESS_FACTS_PER_OWNER = 50
+MAX_BUSINESS_KEYWORD_RULES_PER_OWNER = 50
+
 
 @dataclass
 class Turn:
@@ -221,6 +224,74 @@ class UserStorage:
                     PRIMARY KEY (user_id, persona_id)
                 )
                 """
+            )
+
+            # Secretary Mode / Telegram Business: подключения бота к личным аккаунтам
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS business_connections (
+                    business_connection_id TEXT PRIMARY KEY,
+                    owner_user_id INTEGER NOT NULL,
+                    user_chat_id INTEGER NOT NULL,
+                    can_reply INTEGER NOT NULL DEFAULT 0,
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_business_conn_owner ON business_connections (owner_user_id)"
+            )
+
+            # Точечный авто-ответ: по умолчанию выключен для каждого нового чата —
+            # бот присылает владельцу черновик на подтверждение, а не отвечает сам
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS business_chat_settings (
+                    business_connection_id TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    chat_title TEXT NOT NULL DEFAULT '',
+                    auto_reply_enabled INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (business_connection_id, chat_id)
+                )
+                """
+            )
+
+            # Карточки «факт → значение» о бизнесе (часы работы, цены, адрес и т.п.) —
+            # подмешиваются в промпт Gemini при ответах в Secretary Mode
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS business_facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_user_id INTEGER NOT NULL,
+                    fact_key TEXT NOT NULL,
+                    fact_value TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (owner_user_id, fact_key)
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_business_facts_owner ON business_facts (owner_user_id)"
+            )
+
+            # Правила по ключевым словам: template — готовый ответ без Gemini,
+            # hint — подсказка, добавляемая в промпт для этого конкретного сообщения
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS business_keyword_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_user_id INTEGER NOT NULL,
+                    keyword TEXT NOT NULL,
+                    rule_type TEXT NOT NULL DEFAULT 'hint',
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (owner_user_id, keyword)
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_business_keywords_owner ON business_keyword_rules (owner_user_id)"
             )
             await db.commit()
 
@@ -919,6 +990,261 @@ class UserStorage:
             os.remove(target_path)
         safe_path = target_path.replace("'", "''")
         await db.execute(f"VACUUM INTO '{safe_path}'")
+
+    # --- Secretary Mode / Telegram Business ---
+
+    async def upsert_business_connection(
+        self,
+        business_connection_id: str,
+        owner_user_id: int,
+        user_chat_id: int,
+        can_reply: bool,
+        is_enabled: bool,
+    ) -> None:
+        """Сохраняет/обновляет состояние Business-подключения при каждом апдейте business_connection."""
+        db = await self._ensure_db()
+        await db.execute(
+            """
+            INSERT INTO business_connections
+                (business_connection_id, owner_user_id, user_chat_id, can_reply, is_enabled, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(business_connection_id) DO UPDATE SET
+                owner_user_id = excluded.owner_user_id,
+                user_chat_id = excluded.user_chat_id,
+                can_reply = excluded.can_reply,
+                is_enabled = excluded.is_enabled,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (business_connection_id, owner_user_id, user_chat_id, int(can_reply), int(is_enabled)),
+        )
+        await db.commit()
+
+    async def get_business_connection(self, business_connection_id: str) -> Optional[dict]:
+        """Возвращает сохранённое состояние Business-подключения по его id, либо None."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            """
+            SELECT business_connection_id, owner_user_id, user_chat_id, can_reply, is_enabled
+            FROM business_connections WHERE business_connection_id = ?
+            """,
+            (business_connection_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "business_connection_id": row["business_connection_id"],
+            "owner_user_id": row["owner_user_id"],
+            "user_chat_id": row["user_chat_id"],
+            "can_reply": bool(row["can_reply"]),
+            "is_enabled": bool(row["is_enabled"]),
+        }
+
+    async def is_auto_reply_enabled(self, business_connection_id: str, chat_id: int) -> bool:
+        """Проверяет, включён ли авто-ответ для конкретного чата в рамках Business-подключения.
+        По умолчанию (для нового чата) — False, т.е. бот присылает черновик на подтверждение."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT auto_reply_enabled FROM business_chat_settings WHERE business_connection_id = ? AND chat_id = ?",
+            (business_connection_id, chat_id),
+        )
+        row = await cursor.fetchone()
+        return bool(row["auto_reply_enabled"]) if row is not None else False
+
+    async def set_auto_reply(self, business_connection_id: str, chat_id: int, enabled: bool) -> None:
+        """Включает/выключает авто-ответ для конкретного чата — точечно, а не глобально."""
+        db = await self._ensure_db()
+        await db.execute(
+            """
+            INSERT INTO business_chat_settings (business_connection_id, chat_id, auto_reply_enabled)
+            VALUES (?, ?, ?)
+            ON CONFLICT(business_connection_id, chat_id) DO UPDATE SET
+                auto_reply_enabled = excluded.auto_reply_enabled
+            """,
+            (business_connection_id, chat_id, int(enabled)),
+        )
+        await db.commit()
+
+    async def track_business_chat(self, business_connection_id: str, chat_id: int, chat_title: str) -> None:
+        """Запоминает/обновляет название чата для Business-подключения, не трогая флаг авто-ответа."""
+        db = await self._ensure_db()
+        await db.execute(
+            """
+            INSERT INTO business_chat_settings (business_connection_id, chat_id, chat_title, auto_reply_enabled)
+            VALUES (?, ?, ?, 0)
+            ON CONFLICT(business_connection_id, chat_id) DO UPDATE SET chat_title = excluded.chat_title
+            """,
+            (business_connection_id, chat_id, chat_title),
+        )
+        await db.commit()
+
+    async def get_auto_reply_chats(self, business_connection_id: str) -> list[dict]:
+        """Возвращает список чатов с включённым точечным авто-ответом для данного подключения."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            """
+            SELECT chat_id, chat_title FROM business_chat_settings
+            WHERE business_connection_id = ? AND auto_reply_enabled = 1
+            """,
+            (business_connection_id,),
+        )
+        rows = await cursor.fetchall()
+        return [{"chat_id": r["chat_id"], "chat_title": r["chat_title"] or str(r["chat_id"])} for r in rows]
+
+    async def get_business_connections_for_owner(self, owner_user_id: int) -> list[dict]:
+        """Возвращает все Business-подключения указанного владельца (в норме — одно)."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            """
+            SELECT business_connection_id, owner_user_id, user_chat_id, can_reply, is_enabled
+            FROM business_connections WHERE owner_user_id = ? ORDER BY updated_at DESC
+            """,
+            (owner_user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "business_connection_id": r["business_connection_id"],
+                "owner_user_id": r["owner_user_id"],
+                "user_chat_id": r["user_chat_id"],
+                "can_reply": bool(r["can_reply"]),
+                "is_enabled": bool(r["is_enabled"]),
+            }
+            for r in rows
+        ]
+
+    # --- Факты о бизнесе (карточки "ключ -> значение") ---
+
+    async def get_business_facts(self, owner_user_id: int) -> list[dict]:
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT id, fact_key, fact_value FROM business_facts WHERE owner_user_id = ? ORDER BY fact_key",
+            (owner_user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [{"id": r["id"], "fact_key": r["fact_key"], "fact_value": r["fact_value"]} for r in rows]
+
+    async def save_business_fact(self, owner_user_id: int, fact_key: str, fact_value: str) -> bool:
+        """Сохраняет/обновляет факт по ключу. Возвращает False, если это новая запись
+        и уже достигнут лимит MAX_BUSINESS_FACTS_PER_OWNER (обновление существующего
+        ключа лимитом не ограничено)."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT 1 FROM business_facts WHERE owner_user_id = ? AND fact_key = ?",
+            (owner_user_id, fact_key),
+        )
+        is_update = (await cursor.fetchone()) is not None
+
+        if not is_update:
+            cursor = await db.execute(
+                "SELECT COUNT(*) as cnt FROM business_facts WHERE owner_user_id = ?", (owner_user_id,)
+            )
+            count = (await cursor.fetchone())["cnt"]
+            if count >= MAX_BUSINESS_FACTS_PER_OWNER:
+                return False
+
+        await db.execute(
+            """
+            INSERT INTO business_facts (owner_user_id, fact_key, fact_value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(owner_user_id, fact_key) DO UPDATE SET fact_value = excluded.fact_value
+            """,
+            (owner_user_id, fact_key, fact_value),
+        )
+        await db.commit()
+        return True
+
+    async def delete_business_fact(self, owner_user_id: int, fact_key: str) -> bool:
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "DELETE FROM business_facts WHERE owner_user_id = ? AND fact_key = ?",
+            (owner_user_id, fact_key),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def delete_business_fact_by_id(self, fact_id: int, owner_user_id: int) -> bool:
+        """Удаление по числовому id — используется кнопками. owner_user_id в WHERE защищает
+        от удаления чужого факта по угаданному/подставленному id в callback_data."""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "DELETE FROM business_facts WHERE id = ? AND owner_user_id = ?",
+            (fact_id, owner_user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    # --- Правила по ключевым словам ---
+
+    async def get_business_keyword_rules(self, owner_user_id: int) -> list[dict]:
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            """
+            SELECT id, keyword, rule_type, content FROM business_keyword_rules
+            WHERE owner_user_id = ? ORDER BY keyword
+            """,
+            (owner_user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {"id": r["id"], "keyword": r["keyword"], "rule_type": r["rule_type"], "content": r["content"]}
+            for r in rows
+        ]
+
+    async def save_business_keyword_rule(
+        self, owner_user_id: int, keyword: str, rule_type: str, content: str
+    ) -> bool:
+        """Сохраняет/обновляет правило. rule_type: 'template' (готовый ответ без Gemini)
+        или 'hint' (подсказка, добавляемая в промпт). Возвращает False при достижении лимита
+        MAX_BUSINESS_KEYWORD_RULES_PER_OWNER для новой записи."""
+        if rule_type not in ("template", "hint"):
+            raise ValueError(f"Некорректный rule_type: {rule_type!r}, ожидается 'template' или 'hint'")
+
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT 1 FROM business_keyword_rules WHERE owner_user_id = ? AND keyword = ?",
+            (owner_user_id, keyword),
+        )
+        is_update = (await cursor.fetchone()) is not None
+
+        if not is_update:
+            cursor = await db.execute(
+                "SELECT COUNT(*) as cnt FROM business_keyword_rules WHERE owner_user_id = ?", (owner_user_id,)
+            )
+            count = (await cursor.fetchone())["cnt"]
+            if count >= MAX_BUSINESS_KEYWORD_RULES_PER_OWNER:
+                return False
+
+        await db.execute(
+            """
+            INSERT INTO business_keyword_rules (owner_user_id, keyword, rule_type, content)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(owner_user_id, keyword) DO UPDATE SET
+                rule_type = excluded.rule_type,
+                content = excluded.content
+            """,
+            (owner_user_id, keyword, rule_type, content),
+        )
+        await db.commit()
+        return True
+
+    async def delete_business_keyword_rule(self, owner_user_id: int, keyword: str) -> bool:
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "DELETE FROM business_keyword_rules WHERE owner_user_id = ? AND keyword = ?",
+            (owner_user_id, keyword),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def delete_business_keyword_rule_by_id(self, rule_id: int, owner_user_id: int) -> bool:
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "DELETE FROM business_keyword_rules WHERE id = ? AND owner_user_id = ?",
+            (rule_id, owner_user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 DEFAULT_AVATAR_PERSONAS = [

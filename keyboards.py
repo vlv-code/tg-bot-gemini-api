@@ -305,6 +305,80 @@ def admin_users_keyboard(users: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def business_menu_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад в бизнес-меню", callback_data="bizmenu:main")]]
+    )
+
+
+def business_menu_keyboard(facts_count: int, rules_count: int, autoreply_count: int) -> InlineKeyboardMarkup:
+    """Корневое меню Secretary Mode — отдельное от главного /menu, командой /business."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"📋 Факты о бизнесе ({facts_count})", callback_data="bizmenu:facts")],
+            [InlineKeyboardButton(text=f"🔑 Ключевые слова ({rules_count})", callback_data="bizmenu:keywords")],
+            [InlineKeyboardButton(text=f"🔁 Авто-ответ по чатам ({autoreply_count})", callback_data="bizmenu:chats")],
+            [InlineKeyboardButton(text="🔌 Статус подключений", callback_data="bizmenu:status")],
+        ]
+    )
+
+
+def business_facts_keyboard(facts: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text=f"❌ {f['fact_key'][:35]}", callback_data=f"biz_fact_del:{f['id']}")]
+        for f in facts
+    ]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в бизнес-меню", callback_data="bizmenu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def business_keywords_keyboard(rules: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"❌ [{'📄' if r['rule_type'] == 'template' else '💡'}] {r['keyword'][:30]}",
+                callback_data=f"biz_kw_del:{r['id']}",
+            )
+        ]
+        for r in rules
+    ]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в бизнес-меню", callback_data="bizmenu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def business_draft_keyboard(draft_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения черновика Secretary Mode — уходит владельцу в личку с ботом."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Отправить", callback_data=f"biz_draft:send:{draft_id}"),
+                InlineKeyboardButton(text="🗑 Отклонить", callback_data=f"biz_draft:discard:{draft_id}"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔁 Включить авто-ответ для этого чата",
+                    callback_data=f"biz_draft:autoreply:{draft_id}",
+                )
+            ],
+        ]
+    )
+
+
+def business_autoreply_chats_keyboard(chats: list[dict]) -> InlineKeyboardMarkup:
+    """Список чатов с включённым авто-ответом Secretary Mode — с кнопкой выключить у каждого."""
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"🔕 Выключить авто: {c['chat_title'][:30]}",
+                callback_data=f"biz_autooff:{c['chat_id']}",
+            )
+        ]
+        for c in chats
+    ]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в бизнес-меню", callback_data="bizmenu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def inline_control_keyboard(session_id: str, author_id: Optional[int] = None) -> InlineKeyboardMarkup:
     """Интерактивная панель управления для инлайн-сообщений (перегенерация, смена стиля, фиксация)."""
     suffix = f":{author_id}" if author_id is not None else ""

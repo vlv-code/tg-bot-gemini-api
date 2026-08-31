@@ -24,6 +24,7 @@ BOT_COMMANDS = [
     BotCommand(command="tts", description="🎧 Озвучить произвольный текст"),
     BotCommand(command="limits", description="📊 Проверить остаток лимитов запросов"),
     BotCommand(command="clear", description="🗑 Очистить историю диалога (выбор чатов)"),
+    BotCommand(command="business", description="💼 Secretary Mode: Telegram Business и авто-ответы"),
     BotCommand(command="admin", description="👑 Панель администратора (для админов)"),
 ]
 

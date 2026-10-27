@@ -216,6 +216,9 @@ storage = UserStorage(
     max_history=settings.max_history_messages,
     default_tts_model=settings.tts_model,
     default_tts_voice=settings.tts_voice,
+    default_avatar_model=settings.default_avatar_model,
+    default_business_model=settings.default_business_model,
+    default_stt_model=settings.default_stt_model,
 )
 
 limiter = RateLimiter(
@@ -227,6 +230,7 @@ gemini_client = build_gemini_client(
     default_voice=settings.tts_voice,
     default_tts_model=settings.tts_model,
     default_model=settings.default_model,
+    timeout_seconds=settings.gemini_timeout_seconds,
 )
 user_locks = UserLocks()
 global_queue = GlobalQueueManager(max_concurrent=settings.max_concurrent_requests)

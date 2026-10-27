@@ -32,7 +32,11 @@ BOT_COMMANDS = [
 
 
 async def start_models_sync_worker() -> None:
-    """Периодически раз в 24 часа синхронизирует список моделей с Google GenAI API."""
+    """Периодически синхронизирует список моделей с Google GenAI API."""
+    if settings.models_sync_interval_hours <= 0:
+        logging.info("Периодическая синхронизация моделей отключена (MODELS_SYNC_INTERVAL_HOURS <= 0)")
+        return
+    interval_seconds = max(60, settings.models_sync_interval_hours * 3600)
     while True:
         try:
             stats = await sync_models_catalog(gemini_client, storage)
@@ -41,7 +45,7 @@ async def start_models_sync_worker() -> None:
             break
         except Exception as exc:
             logging.warning("Ошибка периодической синхронизации моделей: %s", exc)
-        await asyncio.sleep(86400)
+        await asyncio.sleep(interval_seconds)
 
 
 async def main() -> None:

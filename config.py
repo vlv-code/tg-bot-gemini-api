@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -26,6 +27,15 @@ class Settings:
         )
     )
     default_model: str = os.getenv("DEFAULT_MODEL", "gemini-3.5-flash-lite")
+    default_avatar_model: Optional[str] = os.getenv("DEFAULT_AVATAR_MODEL", None) or None
+    default_business_model: Optional[str] = os.getenv("DEFAULT_BUSINESS_MODEL", None) or None
+    default_stt_model: Optional[str] = os.getenv("DEFAULT_STT_MODEL", None) or None
+
+    # Таймаут запросов к Gemini API в секундах
+    gemini_timeout_seconds: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "35.0"))
+
+    # Интервал авто-синхронизации каталога моделей с Google GenAI API в часах (0 = отключено)
+    models_sync_interval_hours: int = int(os.getenv("MODELS_SYNC_INTERVAL_HOURS", "24"))
 
     max_history_messages: int = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 

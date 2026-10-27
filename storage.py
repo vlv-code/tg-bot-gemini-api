@@ -53,12 +53,18 @@ class UserStorage:
         max_history: int,
         default_tts_model: str = "gemini-3.8-flash-tts",
         default_tts_voice: str = "Aoede",
+        default_avatar_model: Optional[str] = None,
+        default_business_model: Optional[str] = None,
+        default_stt_model: Optional[str] = None,
     ) -> None:
         self._db_path = db_path
         self._default_model = default_model
         self._max_history = max_history
         self._default_tts_model = default_tts_model
         self._default_tts_voice = default_tts_voice
+        self._default_avatar_model = default_avatar_model
+        self._default_business_model = default_business_model
+        self._default_stt_model = default_stt_model
         self._db: Optional[aiosqlite.Connection] = None
         self._init_lock = asyncio.Lock()
         self._write_lock = AsyncRLock()
@@ -348,9 +354,17 @@ class UserStorage:
             await db.execute(
                 """
                 INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice, avatar_model, business_model, stt_model)
-                VALUES (?, ?, 1, 0, '', '', ?, ?, NULL, NULL, NULL)
+                VALUES (?, ?, 1, 0, '', '', ?, ?, ?, ?, ?)
                 """,
-                (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
+                (
+                    user_id,
+                    self._default_model,
+                    self._default_tts_model,
+                    self._default_tts_voice,
+                    self._default_avatar_model,
+                    self._default_business_model,
+                    self._default_stt_model,
+                ),
             )
             await db.commit()
 

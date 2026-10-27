@@ -37,6 +37,9 @@ class Settings:
     # Интервал авто-синхронизации каталога моделей с Google GenAI API в часах (0 = отключено)
     models_sync_interval_hours: int = int(os.getenv("MODELS_SYNC_INTERVAL_HOURS", "24"))
 
+    # Задержка дебаунса для Secretary Mode в секундах (склейка лесенок сообщений клиентов)
+    business_debounce_seconds: float = float(os.getenv("BUSINESS_DEBOUNCE_SECONDS", "3.5"))
+
     max_history_messages: int = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "15"))

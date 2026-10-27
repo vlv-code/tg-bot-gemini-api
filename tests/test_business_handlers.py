@@ -58,6 +58,7 @@ class TestSecretaryModeFlow(unittest.IsolatedAsyncioTestCase):
         biz.storage._db = None
         await biz.storage.init_db()
         biz._pending_drafts.clear()
+        biz.debounce_manager.delay_seconds = 0
         # limiter/global_queue — модульные синглтоны в handlers.common, общие для
         # всех тестов файла; сбрасываем состояние OWNER_ID, иначе к концу файла
         # накопленные хиты по одному и тому же user_id исчерпывают per-minute лимит

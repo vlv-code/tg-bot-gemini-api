@@ -33,8 +33,11 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import BusinessConnection, CallbackQuery, Message
+from google.genai import types
 
 from config import settings
+from debounce import AccumulatedMessage, DebounceManager
+from draft_editor import DraftActionType, DraftRegistry, parse_reply_action
 from formatting import markdown_to_chunks, split_plain_text
 from gemini_client import GeminiError
 from handlers.common import _get_user_priority, gemini_client, global_queue, limiter, storage, user_locks
@@ -46,6 +49,7 @@ from keyboards import (
     business_menu_back_keyboard,
     business_menu_keyboard,
 )
+from media_batch import build_media_batch, format_incoming_summary
 from storage import MAX_BUSINESS_FACTS_PER_OWNER, MAX_BUSINESS_KEYWORD_RULES_PER_OWNER
 
 logger = logging.getLogger(__name__)
@@ -53,6 +57,8 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 _PENDING_DRAFT_TTL_SECONDS = 3600  # черновик старше часа считаем неактуальным
+draft_registry = DraftRegistry()
+_cached_bot: Optional[Bot] = None
 
 
 @dataclass
@@ -63,6 +69,7 @@ class PendingDraft:
     owner_user_id: int
     draft_text: str
     incoming_text: str = ""
+    incoming_summary: str = ""
     counterparty_name: str = "Собеседник"
     hint_texts: list = field(default_factory=list)
     persona_id: Optional[object] = None
@@ -72,9 +79,6 @@ class PendingDraft:
 
 
 # Временное хранилище черновиков на подтверждение (draft_id -> PendingDraft).
-# Живёт только в памяти процесса: рестарт бота = черновики теряются, собеседник
-# просто не получит ответ на то конкретное сообщение — не страшно и не опасно,
-# в отличие от хранения в БД ради пары часов жизни объекта.
 _pending_drafts: dict[str, PendingDraft] = {}
 
 
@@ -83,6 +87,8 @@ def _cleanup_pending_drafts() -> None:
     expired = [did for did, d in _pending_drafts.items() if now - d.created_at > _PENDING_DRAFT_TTL_SECONDS]
     for did in expired:
         _pending_drafts.pop(did, None)
+        draft_registry.remove_draft(did)
+    draft_registry.cleanup_expired()
 
 
 def _build_secretary_prompt(
@@ -140,11 +146,15 @@ async def _generate_secretary_reply(
     hint_texts: list,
     persona_prompt: str = "",
     jitter: bool = False,
+    media_parts: Optional[list] = None,
+    revision_instruction: str = "",
+    current_draft_text: str = "",
 ):
     """Общий путь генерации ответа Gemini для Secretary Mode: используется и для первого
-    черновика, и для перегенерации/смены стиля по кнопке. НЕ пишет в историю — это делает
-    вызывающий код в момент, когда ответ реально уходит собеседнику (send/auto-reply),
-    чтобы отклонённые/перегенерированные черновики не засоряли историю переписки.
+    черновика, и для перегенерации/смены стиля по кнопке, и для Reply-to-Edit докрутки.
+    НЕ пишет в историю — это делает вызывающий код в момент, когда ответ реально уходит
+    собеседнику (send/auto-reply), чтобы отклонённые/перегенерированные черновики не засоряли
+    историю переписки.
 
     Возвращает (response, state); response is None при ошибке/исчерпанном лимите."""
     async with user_locks.get(owner_user_id):
@@ -169,21 +179,34 @@ async def _generate_secretary_reply(
                 persona_style=persona_prompt,
             )
 
-            message_input = incoming_text
-            if jitter:
+            if revision_instruction:
+                message_input = (
+                    f"Previous draft reply:\n{current_draft_text}\n\n"
+                    f"Owner's correction instruction:\n\"{revision_instruction}\"\n\n"
+                    f"Client's incoming message:\n{incoming_text}\n\n"
+                    f"Rewrite and improve the draft reply strictly following the owner's instruction."
+                )
+            elif jitter:
                 message_input = (
                     f"{incoming_text}\n\n"
                     "[SYSTEM NOTE: the owner asked for another, genuinely different variation "
                     "of the reply — do not just lightly reword the previous attempt, change the "
                     "approach/phrasing meaningfully.]"
                 )
+            else:
+                message_input = incoming_text or "Voice/Media message from client"
+
+            if media_parts:
+                message_payload = [types.Part.from_text(text=message_input), *media_parts]
+            else:
+                message_payload = message_input
 
             business_model = state.business_model or state.model
             try:
                 response = await gemini_client.ask(
                     model=business_model,
                     history_turns=state.history,
-                    message=message_input,
+                    message=message_payload,
                     system_prompt=effective_prompt,
                     want_audio=False,
                 )
@@ -208,7 +231,8 @@ async def _generate_secretary_reply(
 
 
 def _render_draft_preview(draft: "PendingDraft") -> str:
-    preview_incoming = draft.incoming_text[:300] + ("…" if len(draft.incoming_text) > 300 else "")
+    summary = draft.incoming_summary or draft.incoming_text
+    preview_incoming = summary[:400] + ("…" if len(summary) > 400 else "")
     style_line = f"\n🎭 <i>Стиль: {html.escape(draft.persona_name)}</i>" if draft.persona_name else ""
     return (
         f"✉️ <b>Черновик ответа для «{html.escape(draft.counterparty_name)}»:</b>{style_line}\n\n"
@@ -346,69 +370,60 @@ async def on_business_connection(event: BusinessConnection, bot: Bot) -> None:
         logger.warning("Не удалось отправить уведомление о статусе Business-подключения владельцу %s", owner_user_id)
 
 
-@router.business_message()
-async def on_business_message(message: Message, bot: Bot) -> None:
-    """Обрабатывает входящее сообщение в подключённом личном чате владельца."""
-    business_connection_id = message.business_connection_id
-    if not business_connection_id:
-        return  # защитный случай — по спецификации Bot API всегда должен быть заполнен
+async def _process_batched_business_messages(
+    bot: Bot,
+    business_connection_id: str,
+    chat_id: int,
+    messages: list[Message],
+) -> None:
+    if not messages:
+        return
 
     connection = await storage.get_business_connection(business_connection_id)
     if connection is None or not connection["is_enabled"] or not connection["can_reply"]:
-        return  # подключение неизвестно / отключено / без права отвечать — молча игнорируем
+        return
 
     owner_user_id = connection["owner_user_id"]
-
-    # Доп. проверка авторизации: business_connection мог быть создан, пока владелец
-    # был в вайтлисте, а потом его оттуда убрали (забанили/отозвали доступ). Сам
-    # AccessMiddleware это не ловит — он для business_message сознательно не проверяет
-    # автора (это клиент, а не владелец), поэтому ревокацию нужно перепроверять здесь.
     if not await storage.is_user_allowed(owner_user_id):
-        logger.info(
-            "Secretary Mode: владелец %s подключения %s больше не в вайтлисте, сообщение проигнорировано",
-            owner_user_id, business_connection_id,
-        )
         return
 
-    # Сообщения, которые владелец отправил сам через свой обычный клиент Telegram,
-    # тоже прилетают как business_message — не отвечаем на них, иначе бот начнёт
-    # реагировать на собственные реплики владельца.
-    if message.from_user and message.from_user.id == owner_user_id:
-        return
-
-    incoming_text = (message.text or message.caption or "").strip()
-    if not incoming_text:
-        return  # V1: только текст; фото/голос/документы в бизнес-чатах — задел на будущее
-
-    chat_id = message.chat.id
+    last_msg = messages[-1]
     counterparty_name = (
-        message.chat.first_name or message.chat.title or message.chat.full_name or "Собеседник"
+        last_msg.chat.first_name or last_msg.chat.title or last_msg.chat.full_name or "Собеседник"
     )
     await storage.track_business_chat(business_connection_id, chat_id, counterparty_name)
 
-    # Проверяем совпадения по ключевым словам ДО обращения к Gemini.
+    payload = await build_media_batch(bot, messages)
+    incoming_text = payload.combined_text.strip()
+    if not incoming_text and not payload.has_media:
+        return
+
     rules = await storage.get_business_keyword_rules(owner_user_id)
-    matched_rules = _match_keyword_rules(rules, incoming_text)
+    matched_rules = _match_keyword_rules(rules, incoming_text) if incoming_text else []
     template_match = next((r for r in matched_rules if r["rule_type"] == "template"), None)
 
     if template_match is not None:
-        # Шаблон уже заранее одобрен владельцем — отправляем мгновенно: без Gemini
-        # (значит без лимитера и очереди, это не запрос к API) и без черновика на
-        # подтверждение (владелец и так согласился с этим текстом, когда его сохранял).
-        await storage.add_turn(owner_user_id, "user", incoming_text, chat_id=chat_id, mode="business")
+        turn_text = incoming_text or format_incoming_summary(payload) or "[Медиа]"
+        await storage.add_turn(owner_user_id, "user", turn_text, chat_id=chat_id, mode="business")
         await storage.add_turn(owner_user_id, "model", template_match["content"], chat_id=chat_id, mode="business")
         owner_settings = await storage.get_settings(owner_user_id)
-        await _send_business_reply(message, template_match["content"], owner_settings.rich_mode)
+        await _send_business_reply(last_msg, template_match["content"], owner_settings.rich_mode)
         return
 
     hint_texts = [r["content"] for r in matched_rules if r["rule_type"] == "hint"]
+    incoming_summary = format_incoming_summary(payload)
 
-    # user-реплика фиксируется сразу (клиент её реально отправил), а вот model-реплику
-    # пишем в историю только когда ответ РЕАЛЬНО уходит (send/auto-reply) — иначе
-    # отклонённые и перегенерированные черновики засоряли бы историю фантомными репликами.
-    await storage.add_turn(owner_user_id, "user", incoming_text, chat_id=chat_id, mode="business")
+    # user-реплика фиксируется сразу
+    turn_text = incoming_summary or incoming_text
+    await storage.add_turn(owner_user_id, "user", turn_text, chat_id=chat_id, mode="business")
 
-    response, state = await _generate_secretary_reply(owner_user_id, chat_id, incoming_text, hint_texts)
+    response, state = await _generate_secretary_reply(
+        owner_user_id=owner_user_id,
+        chat_id=chat_id,
+        incoming_text=incoming_text,
+        hint_texts=hint_texts,
+        media_parts=payload.gemini_parts,
+    )
 
     if response is None or not response.text:
         return
@@ -416,7 +431,7 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     auto_reply = await storage.is_auto_reply_enabled(business_connection_id, chat_id)
     if auto_reply:
         await storage.add_turn(owner_user_id, "model", response.text, chat_id=chat_id, mode="business")
-        await _send_business_reply(message, response.text, state.rich_mode)
+        await _send_business_reply(last_msg, response.text, state.rich_mode)
         return
 
     _cleanup_pending_drafts()
@@ -428,20 +443,189 @@ async def on_business_message(message: Message, bot: Bot) -> None:
         owner_user_id=owner_user_id,
         draft_text=response.text,
         incoming_text=incoming_text,
+        incoming_summary=incoming_summary,
         counterparty_name=counterparty_name,
         hint_texts=hint_texts,
     )
     _pending_drafts[draft_id] = draft
 
     try:
-        await bot.send_message(
+        sent_msg = await bot.send_message(
             chat_id=connection["user_chat_id"],
             text=_render_draft_preview(draft),
             parse_mode="HTML",
             reply_markup=business_draft_keyboard(draft_id),
         )
+        draft_registry.register_card(sent_msg.message_id, draft_id)
     except Exception:
         logger.warning("Не удалось отправить черновик владельцу %s", owner_user_id)
+
+
+async def _on_debounce_flush(key: tuple, items: list[AccumulatedMessage]) -> None:
+    if not items:
+        return
+    business_connection_id, chat_id = key
+    raw_messages = [item.raw_message for item in items if item.raw_message is not None]
+    if not raw_messages:
+        return
+    msg_bot = getattr(raw_messages[0], "bot", None)
+    bot = msg_bot if isinstance(msg_bot, Bot) else (_cached_bot or msg_bot)
+    if bot is None:
+        logger.warning("Secretary Mode: bot instance unavailable during debounce flush for %s", key)
+        return
+    await _process_batched_business_messages(bot, business_connection_id, chat_id, raw_messages)
+
+
+debounce_manager = DebounceManager(
+    delay_seconds=settings.business_debounce_seconds,
+    on_flush=_on_debounce_flush,
+)
+
+
+@router.business_message()
+async def on_business_message(message: Message, bot: Bot) -> None:
+    """Обрабатывает входящее сообщение в подключённом личном чате владельца."""
+    global _cached_bot
+    _cached_bot = bot
+
+    business_connection_id = message.business_connection_id
+    if not business_connection_id:
+        return  # защитный случай — по спецификации Bot API всегда должен быть заполнен
+
+    connection = await storage.get_business_connection(business_connection_id)
+    if connection is None or not connection["is_enabled"] or not connection["can_reply"]:
+        return  # подключение неизвестно / отключено / без права отвечать — молча игнорируем
+
+    owner_user_id = connection["owner_user_id"]
+
+    if not await storage.is_user_allowed(owner_user_id):
+        logger.info(
+            "Secretary Mode: владелец %s подключения %s больше не в вайтлисте, сообщение проигнорировано",
+            owner_user_id, business_connection_id,
+        )
+        return
+
+    # Сообщения владельца игнорируем
+    if message.from_user and message.from_user.id == owner_user_id:
+        return
+
+    has_text = isinstance(message.text or message.caption, str) and bool((message.text or message.caption).strip())
+    has_voice = bool(message.voice and isinstance(getattr(message.voice, "file_id", None), str))
+    has_photo = bool(message.photo and isinstance(message.photo, (list, tuple)) and len(message.photo) > 0)
+    has_audio = bool(message.audio and isinstance(getattr(message.audio, "file_id", None), str))
+    if not has_text and not (has_voice or has_photo or has_audio):
+        return
+
+    chat_id = message.chat.id
+    counterparty_name = (
+        message.chat.first_name or message.chat.title or message.chat.full_name or "Собеседник"
+    )
+
+    acc_msg = AccumulatedMessage(
+        text=message.text or message.caption or "",
+        message_id=message.message_id,
+        counterparty_name=counterparty_name,
+        raw_message=message,
+    )
+    await debounce_manager.push((business_connection_id, chat_id), acc_msg)
+
+
+@router.message(F.reply_to_message)
+async def on_draft_reply(message: Message, bot: Bot) -> None:
+    """Обрабатывает реплай владельца на карточку черновика:
+    - если начинается с . или ! -> моментальная прямая отправка клиенту
+    - если обычный текст -> докрутка черновика через Gemini
+    """
+    if message.chat.type != "private":
+        return
+
+    replied = message.reply_to_message
+    if replied is None:
+        return
+
+    draft_id = draft_registry.get_draft_id_by_card(replied.message_id)
+    if not draft_id:
+        return
+
+    draft = _pending_drafts.get(draft_id)
+    if draft is None:
+        await message.answer("⚠️ Черновик устарел или уже обработан.")
+        return
+
+    if message.from_user and message.from_user.id != draft.owner_user_id:
+        return
+
+    reply_text = (message.text or message.caption or "").strip()
+    if not reply_text:
+        return
+
+    parsed = parse_reply_action(reply_text, draft_id)
+
+    if parsed.action_type == DraftActionType.INSTANT_SEND:
+        try:
+            await bot.send_message(
+                chat_id=draft.chat_id,
+                text=parsed.text,
+                business_connection_id=draft.business_connection_id,
+            )
+        except Exception as exc:
+            logger.warning("Не удалось отправить ручной ответ клиенту: %s", exc)
+            await message.answer("⚠️ Не удалось отправить сообщение в чат с клиентом.")
+            return
+
+        await storage.add_turn(draft.owner_user_id, "model", parsed.text, chat_id=draft.chat_id, mode="business")
+        _pending_drafts.pop(draft_id, None)
+        draft_registry.remove_draft(draft_id)
+
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=replied.message_id,
+                text=f"✉️ <b>Черновик закрыт (отправлен ручной ответ):</b>\n\n<blockquote>{html.escape(parsed.text)}</blockquote>",
+                parse_mode="HTML",
+            )
+        except TelegramBadRequest:
+            pass
+
+        await message.answer("✅ Ответ отправлен собеседнику напрямую!")
+        return
+
+    if parsed.action_type == DraftActionType.REVISE_INSTRUCTION:
+        status_msg = await message.answer("🔄 Докручиваю черновик по вашей инструкции... ⏳")
+        response, _ = await _generate_secretary_reply(
+            owner_user_id=draft.owner_user_id,
+            chat_id=draft.chat_id,
+            incoming_text=draft.incoming_text,
+            hint_texts=draft.hint_texts,
+            persona_prompt=draft.persona_prompt,
+            revision_instruction=parsed.text,
+            current_draft_text=draft.draft_text,
+        )
+
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        if response is None or not response.text:
+            await message.answer("⚠️ Не удалось обновить черновик (ошибка Gemini или исчерпан лимит).")
+            return
+
+        draft.draft_text = response.text
+        draft.created_at = time.time()
+
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=replied.message_id,
+                text=_render_draft_preview(draft),
+                parse_mode="HTML",
+                reply_markup=business_draft_keyboard(draft_id),
+            )
+            await message.answer("✅ Черновик обновлён с учётом ваших правок.")
+        except TelegramBadRequest:
+            pass
+        return
 
 
 @router.callback_query(F.data.startswith("biz_draft:"))
@@ -463,6 +647,7 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
 
     if action == "discard":
         _pending_drafts.pop(draft_id, None)
+        draft_registry.remove_draft(draft_id)
         try:
             await callback.message.edit_text("🗑 Черновик отклонён, ничего не отправлено.")
         except TelegramBadRequest:
@@ -485,6 +670,7 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
             return
         await storage.add_turn(draft.owner_user_id, "model", draft.draft_text, chat_id=draft.chat_id, mode="business")
         _pending_drafts.pop(draft_id, None)
+        draft_registry.remove_draft(draft_id)
         try:
             await callback.message.edit_text("✅ Отправлено собеседнику.")
         except TelegramBadRequest:
@@ -508,6 +694,7 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
             logger.warning("Не удалось отправить черновик при включении авто-ответа: %s", exc)
             note = "⚠️ Этот черновик отправить не удалось, но "
         _pending_drafts.pop(draft_id, None)
+        draft_registry.remove_draft(draft_id)
         try:
             await callback.message.edit_text(
                 f"{note}авто-ответ для этого чата включён ✅\n\nВыключить: команда /business."

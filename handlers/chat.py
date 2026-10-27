@@ -5,7 +5,7 @@ from typing import Optional, Union
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji
 from google.genai import types
 
 from handlers.common import (

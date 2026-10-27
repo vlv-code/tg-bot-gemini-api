@@ -39,13 +39,17 @@ class GeminiClient:
         default_system_prompt: str = "",
         default_voice: str = "Aoede",
         default_tts_model: str = "gemini-3.8-flash-tts",
+        default_model: str = "gemini-3.5-flash-lite",
+        timeout_seconds: float = 35.0,
     ) -> None:
+        self.default_model = default_model
+        self.timeout_seconds = timeout_seconds
         self._client = genai.Client(
             api_key=api_key,
             http_options=types.HttpOptions(
-                timeout=120_000,
+                timeout=int(timeout_seconds * 1000),
                 retry_options=types.HttpRetryOptions(
-                    attempts=3,
+                    attempts=2,
                     http_status_codes=[503, 504],
                 ),
             ),
@@ -134,15 +138,52 @@ class GeminiClient:
         else:
             content_input = message
 
-        chat = self._client.aio.chats.create(model=model, config=config, history=history)
+        models_to_try = [model]
+        if (
+            self.default_model
+            and self.default_model != model
+            and not is_audio_model
+            and self.default_model not in models_to_try
+        ):
+            models_to_try.append(self.default_model)
 
-        try:
-            async with asyncio.timeout(120):
-                response = await chat.send_message(content_input)
-        except TimeoutError as exc:
-            raise GeminiError("Превышено время ожидания ответа от Gemini API (таймаут 120 сек). Попробуйте повторить запрос позже.") from exc
-        except Exception as exc:  # noqa: BLE001 — ловим всё от SDK
-            raise GeminiError(self._friendly_message(exc)) from exc
+        response = None
+        for current_model in models_to_try:
+            logger.info(
+                "Запрос к Gemini API (модель: %s, history: %d turns)...",
+                current_model,
+                len(history_turns),
+            )
+            chat = self._client.aio.chats.create(model=current_model, config=config, history=history)
+
+            try:
+                async with asyncio.timeout(self.timeout_seconds):
+                    response = await chat.send_message(content_input)
+                break
+            except TimeoutError as exc:
+                if current_model != models_to_try[-1]:
+                    logger.warning(
+                        "Модель %s не ответила за %.0f сек (таймаут). Фоллбэк на %s...",
+                        current_model,
+                        self.timeout_seconds,
+                        models_to_try[-1],
+                    )
+                    continue
+                raise GeminiError(
+                    f"Превышено время ожидания ответа от Gemini API (таймаут {int(self.timeout_seconds)} сек). Попробуйте повторить запрос позже."
+                ) from exc
+            except Exception as exc:  # noqa: BLE001
+                err_str = str(exc).upper()
+                is_overloaded = any(x in err_str for x in ("503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED", "HIGH DEMAND"))
+                if is_overloaded and current_model != models_to_try[-1]:
+                    logger.warning(
+                        "Модель %s перегружена (%s). Автоматический фоллбэк на %s...",
+                        current_model,
+                        exc,
+                        models_to_try[-1],
+                    )
+                    continue
+                raise GeminiError(self._friendly_message(exc)) from exc
 
         text = getattr(response, "text", "") or ""
         audio_bytes = None
@@ -215,7 +256,7 @@ class GeminiClient:
             )
             try:
                 logger.info("Генерация TTS для текста (%d симв.) голосом %s через модель %s...", len(text), effective_voice, target_model)
-                async with asyncio.timeout(120):
+                async with asyncio.timeout(self.timeout_seconds):
                     response = await self._client.aio.models.generate_content(
                         model=target_model,
                         contents=f"Прочитай следующий текст:\n\n{text}",
@@ -229,7 +270,7 @@ class GeminiClient:
                             logger.info("TTS успешно сгенерирован через модель %s (%d байт)", target_model, len(audio_bytes))
                             return audio_bytes
             except TimeoutError as exc:
-                logger.warning("Таймаут TTS через модель %s (120 сек)", target_model)
+                logger.warning("Таймаут TTS через модель %s (%.0f сек)", target_model, self.timeout_seconds)
                 last_error = exc
                 continue
             except Exception as exc:  # noqa: BLE001
@@ -273,12 +314,16 @@ def build_gemini_client(
     default_system_prompt: str = "",
     default_voice: str = "Aoede",
     default_tts_model: str = "gemini-3.8-flash-tts",
+    default_model: str = "gemini-3.5-flash-lite",
+    timeout_seconds: float = 35.0,
 ) -> GeminiClient:
     return GeminiClient(
         api_key=api_key,
         default_system_prompt=default_system_prompt,
         default_voice=default_voice,
         default_tts_model=default_tts_model,
+        default_model=default_model,
+        timeout_seconds=timeout_seconds,
     )
 
 

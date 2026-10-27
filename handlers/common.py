@@ -226,6 +226,7 @@ gemini_client = build_gemini_client(
     default_system_prompt=settings.system_prompt,
     default_voice=settings.tts_voice,
     default_tts_model=settings.tts_model,
+    default_model=settings.default_model,
 )
 user_locks = UserLocks()
 global_queue = GlobalQueueManager(max_concurrent=settings.max_concurrent_requests)

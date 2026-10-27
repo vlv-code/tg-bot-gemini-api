@@ -1,4 +1,4 @@
-﻿import os
+import os
 import shutil
 import tempfile
 import unittest
@@ -18,7 +18,7 @@ class TestUserStorage(unittest.IsolatedAsyncioTestCase):
             db_path=self.db_path,
             default_model="gemini-3.5-flash-lite",
             max_history=5,
-            default_tts_model="gemini-2.5-flash-preview-tts",
+            default_tts_model="gemini-3.8-flash-tts",
             default_tts_voice="Aoede",
         )
         await self.storage.init_db()
@@ -127,6 +127,29 @@ class TestUserStorage(unittest.IsolatedAsyncioTestCase):
         await self.storage.backup_to_file(backup_file)
         self.assertTrue(os.path.exists(backup_file))
         self.assertGreater(os.path.getsize(backup_file), 0)
+
+    async def test_concurrent_writes_and_reentrancy(self):
+        # 1. Проверяем реентрантность: set_model вызывает _ensure_user, оба под _write_lock
+        user_id = 111222
+        await self.storage.set_model(user_id, "gemini-4-argon")
+        state = await self.storage.get_settings(user_id)
+        self.assertEqual(state.model, "gemini-4-argon")
+
+        # 2. Проверяем параллельные конкурентные записи
+        import asyncio
+
+        async def writer(uid: int):
+            for i in range(5):
+                await self.storage.add_turn(uid, "user", f"msg {i}")
+                await self.storage.toggle_rich(uid)
+
+        tasks = [writer(1000 + i) for i in range(10)]
+        await asyncio.gather(*tasks)
+
+        # Проверяем, что для всех 10 юзеров данные успешно записаны
+        for i in range(10):
+            st = await self.storage.get(1000 + i)
+            self.assertEqual(len(st.history), 5)
 
 
 if __name__ == "__main__":

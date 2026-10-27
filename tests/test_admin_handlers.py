@@ -18,7 +18,7 @@ class TestAdminHandlersAndStorage(unittest.IsolatedAsyncioTestCase):
             db_path=self.db_path,
             default_model="gemini-3.5-flash-lite",
             max_history=5,
-            default_tts_model="gemini-3.1-flash-tts-preview",
+            default_tts_model="gemini-3.8-flash-tts",
             default_tts_voice="Aoede",
         )
         await self.storage.init_db()

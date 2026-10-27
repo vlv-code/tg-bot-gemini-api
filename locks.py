@@ -30,9 +30,9 @@ logger = logging.getLogger(__name__)
 
 class UserLocks:
     def __init__(self) -> None:
-        self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._locks: dict[Any, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    def get(self, user_id: int) -> asyncio.Lock:
+    def get(self, user_id: Any) -> asyncio.Lock:
         return self._locks[user_id]
 
 
@@ -139,4 +139,41 @@ class GlobalQueueManager:
                 next_item.future.set_result(None)
                 return
         self._running_count = max(0, self._running_count - 1)
+
+
+class AsyncRLock:
+    """Асинхронный реентрантный лок (reentrant lock) для безопасной сериализации
+    вложенных транзакций в рамках одной корутины / таски.
+    """
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: Optional[asyncio.Task] = None
+        self._count: int = 0
+
+    async def acquire(self) -> bool:
+        current = asyncio.current_task()
+        if self._owner is current:
+            self._count += 1
+            return True
+        await self._lock.acquire()
+        self._owner = current
+        self._count = 1
+        return True
+
+    def release(self) -> None:
+        current = asyncio.current_task()
+        if self._owner is not current:
+            raise RuntimeError("Cannot release an un-acquired lock or a lock owned by another task")
+        self._count -= 1
+        if self._count == 0:
+            self._owner = None
+            self._lock.release()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
 

@@ -49,6 +49,43 @@ def _run_background_task(coro) -> asyncio.Task:
     return task
 
 
+FORWARD_CONTEXT_TTL = 180.0
+
+
+@dataclass
+class ForwardedContext:
+    text: str
+    sender_name: str = "Собеседник"
+    media_bytes: Optional[bytes] = None
+    mime_type: Optional[str] = None
+    notification_message_id: Optional[int] = None
+    created_at: float = field(default_factory=time.time)
+
+
+_forwarded_contexts: dict[int, ForwardedContext] = {}
+
+
+def save_forwarded_context(user_id: int, ctx: ForwardedContext) -> None:
+    """Сохраняет пересланный контекст собеседника с TTL 180 секунд."""
+    now = time.time()
+    expired = [uid for uid, c in _forwarded_contexts.items() if now - c.created_at > FORWARD_CONTEXT_TTL]
+    for uid in expired:
+        _forwarded_contexts.pop(uid, None)
+    _forwarded_contexts[user_id] = ctx
+
+
+def get_forwarded_context(user_id: int, consume: bool = False) -> Optional[ForwardedContext]:
+    """Возвращает активный контекст собеседника (если не протух). При consume=True удаляет его."""
+    ctx = _forwarded_contexts.get(user_id)
+    if not ctx:
+        return None
+    if time.time() - ctx.created_at > FORWARD_CONTEXT_TTL:
+        _forwarded_contexts.pop(user_id, None)
+        return None
+    if consume:
+        _forwarded_contexts.pop(user_id, None)
+    return ctx
+
 @dataclass
 class InlineSession:
     session_id: str
@@ -59,6 +96,9 @@ class InlineSession:
     persona_prompt: str = ""
     is_quick: bool = False
     interactive: bool = False
+    active_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    cleanup_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    forwarded_context: Optional[ForwardedContext] = None
     created_at: float = field(default_factory=time.time)
 
 
@@ -77,6 +117,29 @@ def _cleanup_inline_sessions() -> None:
         for sid in list(_inline_sessions.keys())[:500]:
             _inline_sessions.pop(sid, None)
 
+
+_http_session: Optional[aiohttp.ClientSession] = None
+_session_lock = asyncio.Lock()
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """Возвращает общий переиспользуемый экземпляр aiohttp.ClientSession."""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        async with _session_lock:
+            if _http_session is None or _http_session.closed:
+                headers = {"User-Agent": "Mozilla/5.0 (compatible; GeminiTelegramBot/1.0)"}
+                timeout = aiohttp.ClientTimeout(total=30, connect=10)
+                _http_session = aiohttp.ClientSession(headers=headers, timeout=timeout)
+    return _http_session
+
+
+async def close_http_session() -> None:
+    """Закрывает общий экземпляр aiohttp.ClientSession при завершении работы бота."""
+    global _http_session
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+        _http_session = None
 
 async def try_download_image_from_url(url: str) -> Optional[tuple[bytes, str]]:
     """Безопасно скачивает изображение по ссылке с защитой от SSRF и лимитом 15 МБ."""
@@ -103,10 +166,29 @@ async def try_download_image_from_url(url: str) -> Optional[tuple[bytes, str]]:
                 return None
 
         max_bytes = 15 * 1024 * 1024
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; GeminiTelegramBot/1.0)"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), allow_redirects=False) as resp:
-                if resp.status == 200:
+        session = await get_http_session()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), allow_redirects=False) as resp:
+            # DNS Rebinding (TOCTOU) защита: проверяем фактический IP подключенного сокета
+            conn = resp.connection
+            if conn and conn.transport:
+                peer = conn.transport.get_extra_info("peername")
+                if peer and isinstance(peer, (tuple, list)) and peer[0]:
+                    try:
+                        actual_ip = ipaddress.ip_address(peer[0])
+                        if (
+                            actual_ip.is_unspecified
+                            or actual_ip.is_private
+                            or actual_ip.is_loopback
+                            or actual_ip.is_link_local
+                            or actual_ip.is_reserved
+                            or actual_ip.is_multicast
+                        ):
+                            logger.warning("Заблокирован DNS Rebinding к адресу %s (peer %s)", parsed.hostname, peer[0])
+                            return None
+                    except ValueError:
+                        return None
+
+            if resp.status == 200:
                     content_type = resp.headers.get("Content-Type", "").lower()
                     if not ("image/" in content_type or url.lower().endswith(IMAGE_EXTENSIONS)):
                         return None
@@ -289,7 +371,7 @@ def _render_info_text() -> str:
         "• В любом чате наберите <code>@bot_username текст</code> для выбора карточек: <b>🥊 Stand</b>, <b>🎭 Avatar</b> или <b>🎧 TTS</b>.\n\n"
         "🛠 <b>Полезные команды:</b>\n"
         "• <code>/menu</code> — главное интерактивное меню всех настроек\n"
-        "• <code>/model</code> — выбор нейросети (Gemini 3.5 Flash Lite, 3.7 Flash и др.)\n"
+        "• <code>/model</code> — выбор нейросети (Gemini 3.5 Flash Lite, 3.8 Flash, 4 Argon и др.)\n"
         "• <code>/limits</code> — остаток лимитов запросов и токенов\n"
         "• <code>/clear</code> — очистка истории диалога"
     )
@@ -487,8 +569,9 @@ async def _process_user_turn(
     force_text_only: bool = False,
     no_quote: bool = False,
     use_quick_prompt: bool = False,
+    user_id_override: Optional[int] = None,
 ) -> None:
-    user_id = message.from_user.id
+    user_id = user_id_override if user_id_override is not None else message.from_user.id
     chat_id = message.chat.id
     chat_title = message.chat.title or message.chat.full_name or "Личные сообщения"
     await storage.track_user_chat(
@@ -554,6 +637,8 @@ async def _process_user_turn(
                         want_audio=want_audio,
                         voice_name=state.tts_voice,
                     )
+                except asyncio.CancelledError:
+                    raise
                 except GeminiError as exc:
                     await message.answer(f"⚠️ {exc}")
                     return
@@ -621,6 +706,18 @@ def _parse_inline_query_intent(raw_query: str, personas: list[dict]) -> tuple[st
     return clean_q, None, "default"
 
 
+async def _auto_remove_inline_buttons(bot_instance: Bot, im_id: str, sid: str, delay: int) -> None:
+    """Удаляет интерактивные инлайн-кнопки под сообщением по истечении delay секунд."""
+    try:
+        await asyncio.sleep(delay)
+        await bot_instance.edit_message_reply_markup(inline_message_id=im_id, reply_markup=None)
+        _inline_sessions.pop(sid, None)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
 async def _execute_inline_generation(
     bot: Bot,
     user_id: int,
@@ -646,7 +743,7 @@ async def _execute_inline_generation(
 
     try:
         status_text = (
-            f"✨ <i>Генерирую сообщение в стиле «{html.escape(persona_name)}»...</i>"
+            "✍️ <i>...</i>"
             if is_quick
             else f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(raw_query)}</blockquote>\n\n✨ <i>Gemini генерирует ответ...</i>"
         )
@@ -654,7 +751,7 @@ async def _execute_inline_generation(
             inline_control_keyboard(session_id)
             if interactive
             else InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{session_id}")]]
+                inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data="inl_noop")]]
             )
         )
         await bot.edit_message_text(
@@ -689,9 +786,44 @@ async def _execute_inline_generation(
         state = await storage.get(user_id)
         priority = await _get_user_priority(user_id)
 
+        if session and not session.forwarded_context:
+            session.forwarded_context = get_forwarded_context(user_id, consume=True)
+
+        if session and session.forwarded_context and session.forwarded_context.notification_message_id:
+            try:
+                await bot.delete_message(chat_id=user_id, message_id=session.forwarded_context.notification_message_id)
+            except Exception:
+                pass
+            session.forwarded_context.notification_message_id = None
+
         content_input: Union[str, Sequence[Union[str, types.Part]]] = raw_query
-        url_match = URL_REGEX.search(raw_query)
-        if url_match:
+        fwd_ctx = session.forwarded_context if session else None
+
+        if fwd_ctx:
+            if is_quick:
+                regen_hint = "\n4. VARIATION: Formulate a FRESH and distinct alternative variation of the message." if temperature_jitter else ""
+                interlocutor_block = (
+                    f"INTERLOCUTOR'S MESSAGE IN CHAT (from {fwd_ctx.sender_name}):\n\"\"\"\n{fwd_ctx.text}\n\"\"\"\n\n"
+                    f"USER DRAFT / INTENT TO BE SENT TO CHAT PARTNER:\n\"\"\"\n{raw_query}\n\"\"\"\n\n"
+                    "GHOSTWRITER INSTRUCTION:\n"
+                    "1. Formulate the ready-to-send outgoing message for the chat partner in the first person ('I', 'me') based on the draft and interlocutor message.\n"
+                    "2. Strictly NEVER respond to or acknowledge the user ('Sure, doing it', 'Checking now'). The user is NOT addressing you.\n"
+                    "3. Output ONLY the raw final message for the interlocutor in the matching conversation language."
+                    f"{regen_hint}"
+                )
+                if fwd_ctx.media_bytes and fwd_ctx.mime_type:
+                    part = types.Part.from_bytes(data=fwd_ctx.media_bytes, mime_type=fwd_ctx.mime_type)
+                    content_input = [part, interlocutor_block]
+                else:
+                    content_input = interlocutor_block
+            else:
+                stand_context_block = f"Контекст пересланного сообщения от {fwd_ctx.sender_name}:\n«««\n{fwd_ctx.text}\n»»»\n\nЗапрос:\n{raw_query}"
+                if fwd_ctx.media_bytes and fwd_ctx.mime_type:
+                    part = types.Part.from_bytes(data=fwd_ctx.media_bytes, mime_type=fwd_ctx.mime_type)
+                    content_input = [part, stand_context_block]
+                else:
+                    content_input = stand_context_block
+        elif url_match:
             img_url = url_match.group(0)
             img_data = await try_download_image_from_url(img_url)
             if img_data:
@@ -735,6 +867,9 @@ async def _execute_inline_generation(
                     want_audio=False,
                 )
                 await limiter.hit(user_id)
+        except asyncio.CancelledError:
+            logger.info("Генерация inline-ответа для session_id=%s была отменена", session_id)
+            raise
         except GeminiError as exc:
             err_text = (
                 f"⚠️ <i>Ошибка Gemini: {html.escape(str(exc))}</i>"
@@ -791,6 +926,19 @@ async def _execute_inline_generation(
         )
 
     markup = inline_control_keyboard(session_id, author_id=user_id) if interactive else None
+
+    # Запускаем авто-снятие кнопок через settings.inline_buttons_ttl_seconds секунд
+    if session and interactive and settings.inline_buttons_ttl_seconds > 0:
+        if session.cleanup_task and not session.cleanup_task.done():
+            session.cleanup_task.cancel()
+        session.cleanup_task = _run_background_task(
+            _auto_remove_inline_buttons(
+                bot_instance=bot,
+                im_id=inline_message_id,
+                sid=session_id,
+                delay=settings.inline_buttons_ttl_seconds,
+            )
+        )
 
     # 1. Если включён rich_mode — отправляем через Message Entities (Markdown)
     if state.rich_mode:

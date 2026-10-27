@@ -30,6 +30,7 @@ def _fake_update(**overrides) -> MagicMock:
     event.edited_business_message = None
     event.deleted_business_messages = None
     event.business_connection = None
+    event.callback_query = None
     for key, value in overrides.items():
         setattr(event, key, value)
     return event
@@ -128,6 +129,21 @@ class TestAccessMiddleware(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "handled")
         handler.assert_awaited_once()
+
+
+    async def test_disallowed_callback_query_answers_to_dismiss_spinner(self):
+        storage = FakeStorage(allowed_ids=set())
+        middleware = AccessMiddleware(storage=storage)
+        handler = AsyncMock(return_value="handled")
+
+        mock_cb = MagicMock()
+        mock_cb.answer = AsyncMock()
+        event = _fake_update(callback_query=mock_cb)
+
+        result = await middleware(handler, event, {"event_from_user": MagicMock(id=999)})
+        self.assertIsNone(result)
+        handler.assert_not_awaited()
+        mock_cb.answer.assert_awaited_once_with("⛔️ Доступ к боту ограничен.", show_alert=False)
 
 
 if __name__ == "__main__":

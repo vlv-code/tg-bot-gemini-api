@@ -156,8 +156,9 @@ async def _generate_secretary_reply(
             )
             return None, None
 
-        priority = await _get_user_priority(owner_user_id)
+    priority = await _get_user_priority(owner_user_id)
 
+    async with user_locks.get((owner_user_id, chat_id)):
         async with global_queue.acquire(owner_user_id, priority=priority):
             state = await storage.get(owner_user_id, chat_id=chat_id, mode="business")
             facts = await storage.get_business_facts(owner_user_id)

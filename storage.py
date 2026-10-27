@@ -14,6 +14,7 @@ from typing import Optional
 import aiosqlite
 
 from config import settings
+from locks import AsyncRLock
 
 MAX_BUSINESS_FACTS_PER_OWNER = 50
 MAX_BUSINESS_KEYWORD_RULES_PER_OWNER = 50
@@ -32,7 +33,7 @@ class UserState:
     voice_mode: bool = False
     system_prompt: str = ""
     quick_prompt: str = ""
-    tts_model: str = "gemini-3.1-flash-tts-preview"
+    tts_model: str = "gemini-3.8-flash-tts"
     tts_voice: str = "Aoede"
     history: list[Turn] = field(default_factory=list)
 
@@ -43,7 +44,7 @@ class UserStorage:
         db_path: str,
         default_model: str,
         max_history: int,
-        default_tts_model: str = "gemini-3.1-flash-tts-preview",
+        default_tts_model: str = "gemini-3.8-flash-tts",
         default_tts_voice: str = "Aoede",
     ) -> None:
         self._db_path = db_path
@@ -53,6 +54,7 @@ class UserStorage:
         self._default_tts_voice = default_tts_voice
         self._db: Optional[aiosqlite.Connection] = None
         self._init_lock = asyncio.Lock()
+        self._write_lock = AsyncRLock()
 
     async def init_db(self) -> None:
         """Инициализирует постоянное соединение с базой данных, WAL-режим и таблицы."""
@@ -314,21 +316,21 @@ class UserStorage:
 
     async def _ensure_user(self, db: aiosqlite.Connection, user_id: int) -> None:
         """Гарантирует существование строки пользователя без лишней выборки."""
-        await db.execute(
-            """
-            INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice)
-            VALUES (?, ?, 1, 0, '', '', ?, ?)
-            """,
-            (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
-        )
+        async with self._write_lock:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice)
+                VALUES (?, ?, 1, 0, '', '', ?, ?)
+                """,
+                (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
+            )
+            await db.commit()
 
     async def get(
         self, user_id: int, chat_id: Optional[int] = None, mode: str = "main"
     ) -> UserState:
         """Получает состояние пользователя и последние сообщения истории конкретного чата и режима."""
         db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-
         target_chat_id = chat_id if chat_id is not None else user_id
 
         cursor = await db.execute(
@@ -336,6 +338,13 @@ class UserStorage:
             (user_id,),
         )
         row = await cursor.fetchone()
+        if row is None:
+            await self._ensure_user(db, user_id)
+            cursor = await db.execute(
+                "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
 
         model = row["model"]
         rich_mode = bool(row["rich_mode"])
@@ -373,13 +382,18 @@ class UserStorage:
     async def get_settings(self, user_id: int) -> UserState:
         """Получает только настройки пользователя без выборки истории сообщений."""
         db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-
         cursor = await db.execute(
             "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
+        if row is None:
+            await self._ensure_user(db, user_id)
+            cursor = await db.execute(
+                "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
 
         return UserState(
             model=row["model"],
@@ -393,73 +407,87 @@ class UserStorage:
         )
 
     async def set_model(self, user_id: int, model: str) -> None:
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "UPDATE users SET model = ? WHERE user_id = ?",
-            (model, user_id),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "UPDATE users SET model = ? WHERE user_id = ?",
+                (model, user_id),
+            )
+            await db.commit()
 
     async def set_tts_model(self, user_id: int, tts_model: str) -> None:
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "UPDATE users SET tts_model = ? WHERE user_id = ?",
-            (tts_model, user_id),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "UPDATE users SET tts_model = ? WHERE user_id = ?",
+                (tts_model, user_id),
+            )
+            await db.commit()
 
     async def set_tts_voice(self, user_id: int, voice: str) -> None:
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "UPDATE users SET tts_voice = ? WHERE user_id = ?",
-            (voice, user_id),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "UPDATE users SET tts_voice = ? WHERE user_id = ?",
+                (voice, user_id),
+            )
+            await db.commit()
 
     async def toggle_rich(self, user_id: int) -> bool:
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "UPDATE users SET rich_mode = CASE WHEN rich_mode = 1 THEN 0 ELSE 1 END WHERE user_id = ?",
-            (user_id,),
-        )
-        await db.commit()
-        cursor = await db.execute("SELECT rich_mode FROM users WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        return bool(row["rich_mode"])
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "UPDATE users SET rich_mode = CASE WHEN rich_mode = 1 THEN 0 ELSE 1 END WHERE user_id = ?",
+                (user_id,),
+            )
+            await db.commit()
+            cursor = await db.execute("SELECT rich_mode FROM users WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return bool(row["rich_mode"])
 
     async def toggle_voice(self, user_id: int) -> bool:
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "UPDATE users SET voice_mode = CASE WHEN voice_mode = 1 THEN 0 ELSE 1 END WHERE user_id = ?",
-            (user_id,),
-        )
-        await db.commit()
-        cursor = await db.execute("SELECT voice_mode FROM users WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        return bool(row["voice_mode"])
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "UPDATE users SET voice_mode = CASE WHEN voice_mode = 1 THEN 0 ELSE 1 END WHERE user_id = ?",
+                (user_id,),
+            )
+            await db.commit()
+            cursor = await db.execute("SELECT voice_mode FROM users WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return bool(row["voice_mode"])
 
     async def set_system_prompt(self, user_id: int, prompt: str) -> None:
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "UPDATE users SET system_prompt = ? WHERE user_id = ?",
-            (prompt, user_id),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "UPDATE users SET system_prompt = ? WHERE user_id = ?",
+                (prompt, user_id),
+            )
+            await db.commit()
 
     async def set_quick_prompt(self, user_id: int, prompt: str) -> None:
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "UPDATE users SET quick_prompt = ? WHERE user_id = ?",
-            (prompt, user_id),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "UPDATE users SET quick_prompt = ? WHERE user_id = ?",
+                (prompt, user_id),
+            )
+            await db.commit()
 
     async def add_turn(
         self,
@@ -469,26 +497,28 @@ class UserStorage:
         chat_id: Optional[int] = None,
         mode: str = "main",
     ) -> None:
-        target_chat_id = chat_id if chat_id is not None else user_id
-        db = await self._ensure_db()
-        await self._ensure_user(db, user_id)
-        await db.execute(
-            "INSERT INTO history (chat_id, user_id, mode, role, text) VALUES (?, ?, ?, ?, ?)",
-            (target_chat_id, user_id, mode, role, text),
-        )
-        await db.execute(
-            """
-            DELETE FROM history
-            WHERE chat_id = ? AND user_id = ? AND mode = ? AND id NOT IN (
-                SELECT id FROM history
-                WHERE chat_id = ? AND user_id = ? AND mode = ?
-                ORDER BY id DESC
-                LIMIT ?
+
+        async with self._write_lock:
+            target_chat_id = chat_id if chat_id is not None else user_id
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(
+                "INSERT INTO history (chat_id, user_id, mode, role, text) VALUES (?, ?, ?, ?, ?)",
+                (target_chat_id, user_id, mode, role, text),
             )
-            """,
-            (target_chat_id, user_id, mode, target_chat_id, user_id, mode, self._max_history),
-        )
-        await db.commit()
+            await db.execute(
+                """
+                DELETE FROM history
+                WHERE chat_id = ? AND user_id = ? AND mode = ? AND id NOT IN (
+                    SELECT id FROM history
+                    WHERE chat_id = ? AND user_id = ? AND mode = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                """,
+                (target_chat_id, user_id, mode, target_chat_id, user_id, mode, self._max_history),
+            )
+            await db.commit()
 
     async def track_user_chat(
         self,
@@ -498,22 +528,24 @@ class UserStorage:
         chat_type: str = "private",
     ) -> None:
         """Сохраняет или обновляет название и тип чата для пользователя."""
-        db = await self._ensure_db()
-        clean_title = chat_title.strip()
-        if not clean_title:
-            clean_title = "Личные сообщения" if chat_id == user_id else f"Чат {chat_id}"
-        await db.execute(
-            """
-            INSERT INTO user_chats (user_id, chat_id, chat_title, chat_type, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id, chat_id) DO UPDATE SET
-                chat_title = excluded.chat_title,
-                chat_type = excluded.chat_type,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (user_id, chat_id, clean_title, chat_type),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            clean_title = chat_title.strip()
+            if not clean_title:
+                clean_title = "Личные сообщения" if chat_id == user_id else f"Чат {chat_id}"
+            await db.execute(
+                """
+                INSERT INTO user_chats (user_id, chat_id, chat_title, chat_type, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, chat_id) DO UPDATE SET
+                    chat_title = excluded.chat_title,
+                    chat_type = excluded.chat_type,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (user_id, chat_id, clean_title, chat_type),
+            )
+            await db.commit()
 
     async def get_user_chats_with_history(self, user_id: int) -> list[dict]:
         """Возвращает список всех чатов пользователя, где есть сохранённая история."""
@@ -549,20 +581,22 @@ class UserStorage:
         self, user_id: int, chat_id: Optional[int] = None, all_chats: bool = False
     ) -> int:
         """Очищает историю диалога: конкретного чата либо всех чатов пользователя."""
-        db = await self._ensure_db()
-        if all_chats:
-            cursor = await db.execute(
-                "DELETE FROM history WHERE user_id = ?",
-                (user_id,),
-            )
-        else:
-            target_chat_id = chat_id if chat_id is not None else user_id
-            cursor = await db.execute(
-                "DELETE FROM history WHERE chat_id = ? AND user_id = ?",
-                (target_chat_id, user_id),
-            )
-        await db.commit()
-        return cursor.rowcount
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            if all_chats:
+                cursor = await db.execute(
+                    "DELETE FROM history WHERE user_id = ?",
+                    (user_id,),
+                )
+            else:
+                target_chat_id = chat_id if chat_id is not None else user_id
+                cursor = await db.execute(
+                    "DELETE FROM history WHERE chat_id = ? AND user_id = ?",
+                    (target_chat_id, user_id),
+                )
+            await db.commit()
+            return cursor.rowcount
 
     async def is_user_admin(self, user_id: int) -> bool:
         """Проверяет, является ли пользователь суперадмином или админом в БД."""
@@ -590,15 +624,17 @@ class UserStorage:
 
     async def toggle_whitelist_mode(self) -> bool:
         """Переключает режим белого списка."""
-        current = await self.get_whitelist_mode()
-        new_val = "0" if current else "1"
-        db = await self._ensure_db()
-        await db.execute(
-            "INSERT INTO bot_settings (key, value) VALUES ('whitelist_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (new_val,),
-        )
-        await db.commit()
-        return new_val == "1"
+
+        async with self._write_lock:
+            current = await self.get_whitelist_mode()
+            new_val = "0" if current else "1"
+            db = await self._ensure_db()
+            await db.execute(
+                "INSERT INTO bot_settings (key, value) VALUES ('whitelist_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (new_val,),
+            )
+            await db.commit()
+            return new_val == "1"
 
     async def is_user_allowed(self, user_id: int) -> bool:
         """Проверяет, разрешён ли доступ пользователю с учётом белого списка."""
@@ -624,28 +660,32 @@ class UserStorage:
         added_by: int = 0,
     ) -> None:
         """Добавляет пользователя в белый список."""
-        db = await self._ensure_db()
-        await db.execute(
-            """
-            INSERT INTO allowed_users (user_id, username, is_admin, added_by)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = CASE WHEN excluded.username != '' THEN excluded.username ELSE allowed_users.username END,
-                is_admin = excluded.is_admin
-            """,
-            (user_id, username, 1 if is_admin else 0, added_by),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await db.execute(
+                """
+                INSERT INTO allowed_users (user_id, username, is_admin, added_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = CASE WHEN excluded.username != '' THEN excluded.username ELSE allowed_users.username END,
+                    is_admin = excluded.is_admin
+                """,
+                (user_id, username, 1 if is_admin else 0, added_by),
+            )
+            await db.commit()
 
     async def remove_allowed_user(self, user_id: int) -> bool:
         """Удаляет пользователя из белого списка."""
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "DELETE FROM allowed_users WHERE user_id = ?",
-            (user_id,),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor = await db.execute(
+                "DELETE FROM allowed_users WHERE user_id = ?",
+                (user_id,),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def list_allowed_users(self) -> list[dict]:
         """Возвращает список всех разрешённых пользователей."""
@@ -675,15 +715,17 @@ class UserStorage:
         total_tokens: int,
     ) -> None:
         """Записывает точный расход токенов из usage_metadata ответа Gemini."""
-        db = await self._ensure_db()
-        await db.execute(
-            """
-            INSERT INTO token_usage (user_id, chat_id, model, prompt_tokens, candidates_tokens, total_tokens)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (user_id, chat_id, model, prompt_tokens, candidates_tokens, total_tokens),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await db.execute(
+                """
+                INSERT INTO token_usage (user_id, chat_id, model, prompt_tokens, candidates_tokens, total_tokens)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, chat_id, model, prompt_tokens, candidates_tokens, total_tokens),
+            )
+            await db.commit()
 
     async def get_token_stats(self, user_id: Optional[int] = None) -> dict[str, int]:
         """Возвращает агрегированную статистику токенов за сегодня и за всё время.
@@ -779,19 +821,21 @@ class UserStorage:
 
     async def save_cached_tts_voice(self, text: str, voice: str, model: str, file_id: str) -> None:
         """Сохраняет сгенерированный voice_file_id в базу данных."""
-        db = await self._ensure_db()
-        key = self._make_tts_cache_key(text, voice, model)
-        await db.execute(
-            """
-            INSERT INTO tts_cache (cache_key, text, voice, model, file_id)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(cache_key) DO UPDATE SET file_id = excluded.file_id
-            """,
-            (key, text.strip(), voice, model, file_id),
-        )
-        await db.commit()
 
-    # --- Управление сохранёнными личностями (Аватар) и промптами (Stand) ---
+        async with self._write_lock:
+            db = await self._ensure_db()
+            key = self._make_tts_cache_key(text, voice, model)
+            await db.execute(
+                """
+                INSERT INTO tts_cache (cache_key, text, voice, model, file_id)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET file_id = excluded.file_id
+                """,
+                (key, text.strip(), voice, model, file_id),
+            )
+            await db.commit()
+
+        # --- Управление сохранёнными личностями (Аватар) и промптами (Stand) ---
 
     async def get_saved_prompts(self, user_id: int, mode: str = "main") -> list[dict]:
         """Возвращает список сохранённых пользователем промптов/личностей."""
@@ -856,42 +900,48 @@ class UserStorage:
 
     async def save_user_prompt(self, user_id: int, name: str, prompt: str, mode: str = "main") -> int:
         """Сохраняет или обновляет именованный промпт / личность."""
-        db = await self._ensure_db()
-        await db.execute(
-            """
-            INSERT INTO user_prompts (user_id, mode, name, prompt)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, mode, name) DO UPDATE SET prompt = excluded.prompt
-            """,
-            (user_id, mode, name.strip(), prompt.strip()),
-        )
-        await db.commit()
-        cursor = await db.execute(
-            "SELECT id FROM user_prompts WHERE user_id = ? AND mode = ? AND name = ?",
-            (user_id, mode, name.strip()),
-        )
-        row = await cursor.fetchone()
-        return row["id"] if row else 0
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await db.execute(
+                """
+                INSERT INTO user_prompts (user_id, mode, name, prompt)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, mode, name) DO UPDATE SET prompt = excluded.prompt
+                """,
+                (user_id, mode, name.strip(), prompt.strip()),
+            )
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT id FROM user_prompts WHERE user_id = ? AND mode = ? AND name = ?",
+                (user_id, mode, name.strip()),
+            )
+            row = await cursor.fetchone()
+            return row["id"] if row else 0
 
     async def delete_user_prompt(self, user_id: int, prompt_id: int) -> bool:
         """Удаляет сохранённый промпт по id."""
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "DELETE FROM user_prompts WHERE id = ? AND user_id = ?",
-            (prompt_id, user_id),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor = await db.execute(
+                "DELETE FROM user_prompts WHERE id = ? AND user_id = ?",
+                (prompt_id, user_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def delete_user_prompt_by_name(self, user_id: int, name: str, mode: str = "main") -> bool:
         """Удаляет сохранённый промпт по имени."""
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "DELETE FROM user_prompts WHERE user_id = ? AND mode = ? AND lower(name) = lower(?)",
-            (user_id, mode, name.strip()),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor = await db.execute(
+                "DELETE FROM user_prompts WHERE user_id = ? AND mode = ? AND lower(name) = lower(?)",
+                (user_id, mode, name.strip()),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def find_persona_by_name_or_id(self, user_id: int, identifier: str) -> Optional[dict]:
         """Ищет личность Аватара по названию или id."""
@@ -925,27 +975,29 @@ class UserStorage:
 
     async def toggle_pinned_persona(self, user_id: int, persona_id: str | int) -> bool:
         """Переключает статус закрепления личности. Возвращает True, если закреплена, False если откреплена."""
-        db = await self._ensure_db()
-        p_id_str = str(persona_id).strip()
-        cursor = await db.execute(
-            "SELECT 1 FROM user_pinned_personas WHERE user_id = ? AND persona_id = ?",
-            (user_id, p_id_str),
-        )
-        exists = await cursor.fetchone()
-        if exists:
-            await db.execute(
-                "DELETE FROM user_pinned_personas WHERE user_id = ? AND persona_id = ?",
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            p_id_str = str(persona_id).strip()
+            cursor = await db.execute(
+                "SELECT 1 FROM user_pinned_personas WHERE user_id = ? AND persona_id = ?",
                 (user_id, p_id_str),
             )
-            await db.commit()
-            return False
-        else:
-            await db.execute(
-                "INSERT INTO user_pinned_personas (user_id, persona_id) VALUES (?, ?)",
-                (user_id, p_id_str),
-            )
-            await db.commit()
-            return True
+            exists = await cursor.fetchone()
+            if exists:
+                await db.execute(
+                    "DELETE FROM user_pinned_personas WHERE user_id = ? AND persona_id = ?",
+                    (user_id, p_id_str),
+                )
+                await db.commit()
+                return False
+            else:
+                await db.execute(
+                    "INSERT INTO user_pinned_personas (user_id, persona_id) VALUES (?, ?)",
+                    (user_id, p_id_str),
+                )
+                await db.commit()
+                return True
 
     async def is_persona_pinned(self, user_id: int, persona_id: str | int) -> bool:
         """Проверяет, закреплена ли личность у пользователя."""
@@ -966,32 +1018,36 @@ class UserStorage:
         self, days_token_usage: int = 60, days_tts_cache: int = 30
     ) -> dict[str, int]:
         """Удаляет устаревшие записи токенов и кэша TTS для предотвращения бесконечного роста БД."""
-        db = await self._ensure_db()
-        cursor_tok = await db.execute(
-            "DELETE FROM token_usage WHERE created_at < datetime('now', ?)",
-            (f"-{days_token_usage} days",),
-        )
-        deleted_tokens = cursor_tok.rowcount
-        cursor_tts = await db.execute(
-            "DELETE FROM tts_cache WHERE created_at < datetime('now', ?)",
-            (f"-{days_tts_cache} days",),
-        )
-        deleted_tts = cursor_tts.rowcount
-        await db.commit()
-        return {"token_usage_deleted": deleted_tokens, "tts_cache_deleted": deleted_tts}
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor_tok = await db.execute(
+                "DELETE FROM token_usage WHERE created_at < datetime('now', ?)",
+                (f"-{days_token_usage} days",),
+            )
+            deleted_tokens = cursor_tok.rowcount
+            cursor_tts = await db.execute(
+                "DELETE FROM tts_cache WHERE created_at < datetime('now', ?)",
+                (f"-{days_tts_cache} days",),
+            )
+            deleted_tts = cursor_tts.rowcount
+            await db.commit()
+            return {"token_usage_deleted": deleted_tokens, "tts_cache_deleted": deleted_tts}
 
     async def backup_to_file(self, target_path: str) -> None:
         """Создаёт онлайн-бэкап базы данных через команду SQLite VACUUM INTO без остановки бота."""
-        db = await self._ensure_db()
-        dirname = os.path.dirname(os.path.abspath(target_path))
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)
-        if os.path.exists(target_path):
-            os.remove(target_path)
-        safe_path = target_path.replace("'", "''")
-        await db.execute(f"VACUUM INTO '{safe_path}'")
 
-    # --- Secretary Mode / Telegram Business ---
+        async with self._write_lock:
+            db = await self._ensure_db()
+            dirname = os.path.dirname(os.path.abspath(target_path))
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            safe_path = target_path.replace("'", "''")
+            await db.execute(f"VACUUM INTO '{safe_path}'")
+
+        # --- Secretary Mode / Telegram Business ---
 
     async def upsert_business_connection(
         self,
@@ -1002,22 +1058,24 @@ class UserStorage:
         is_enabled: bool,
     ) -> None:
         """Сохраняет/обновляет состояние Business-подключения при каждом апдейте business_connection."""
-        db = await self._ensure_db()
-        await db.execute(
-            """
-            INSERT INTO business_connections
-                (business_connection_id, owner_user_id, user_chat_id, can_reply, is_enabled, updated_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(business_connection_id) DO UPDATE SET
-                owner_user_id = excluded.owner_user_id,
-                user_chat_id = excluded.user_chat_id,
-                can_reply = excluded.can_reply,
-                is_enabled = excluded.is_enabled,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (business_connection_id, owner_user_id, user_chat_id, int(can_reply), int(is_enabled)),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await db.execute(
+                """
+                INSERT INTO business_connections
+                    (business_connection_id, owner_user_id, user_chat_id, can_reply, is_enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(business_connection_id) DO UPDATE SET
+                    owner_user_id = excluded.owner_user_id,
+                    user_chat_id = excluded.user_chat_id,
+                    can_reply = excluded.can_reply,
+                    is_enabled = excluded.is_enabled,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (business_connection_id, owner_user_id, user_chat_id, int(can_reply), int(is_enabled)),
+            )
+            await db.commit()
 
     async def get_business_connection(self, business_connection_id: str) -> Optional[dict]:
         """Возвращает сохранённое состояние Business-подключения по его id, либо None."""
@@ -1053,30 +1111,34 @@ class UserStorage:
 
     async def set_auto_reply(self, business_connection_id: str, chat_id: int, enabled: bool) -> None:
         """Включает/выключает авто-ответ для конкретного чата — точечно, а не глобально."""
-        db = await self._ensure_db()
-        await db.execute(
-            """
-            INSERT INTO business_chat_settings (business_connection_id, chat_id, auto_reply_enabled)
-            VALUES (?, ?, ?)
-            ON CONFLICT(business_connection_id, chat_id) DO UPDATE SET
-                auto_reply_enabled = excluded.auto_reply_enabled
-            """,
-            (business_connection_id, chat_id, int(enabled)),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await db.execute(
+                """
+                INSERT INTO business_chat_settings (business_connection_id, chat_id, auto_reply_enabled)
+                VALUES (?, ?, ?)
+                ON CONFLICT(business_connection_id, chat_id) DO UPDATE SET
+                    auto_reply_enabled = excluded.auto_reply_enabled
+                """,
+                (business_connection_id, chat_id, int(enabled)),
+            )
+            await db.commit()
 
     async def track_business_chat(self, business_connection_id: str, chat_id: int, chat_title: str) -> None:
         """Запоминает/обновляет название чата для Business-подключения, не трогая флаг авто-ответа."""
-        db = await self._ensure_db()
-        await db.execute(
-            """
-            INSERT INTO business_chat_settings (business_connection_id, chat_id, chat_title, auto_reply_enabled)
-            VALUES (?, ?, ?, 0)
-            ON CONFLICT(business_connection_id, chat_id) DO UPDATE SET chat_title = excluded.chat_title
-            """,
-            (business_connection_id, chat_id, chat_title),
-        )
-        await db.commit()
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await db.execute(
+                """
+                INSERT INTO business_chat_settings (business_connection_id, chat_id, chat_title, auto_reply_enabled)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(business_connection_id, chat_id) DO UPDATE SET chat_title = excluded.chat_title
+                """,
+                (business_connection_id, chat_id, chat_title),
+            )
+            await db.commit()
 
     async def get_auto_reply_chats(self, business_connection_id: str) -> list[dict]:
         """Возвращает список чатов с включённым точечным авто-ответом для данного подключения."""
@@ -1128,53 +1190,59 @@ class UserStorage:
         """Сохраняет/обновляет факт по ключу. Возвращает False, если это новая запись
         и уже достигнут лимит MAX_BUSINESS_FACTS_PER_OWNER (обновление существующего
         ключа лимитом не ограничено)."""
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "SELECT 1 FROM business_facts WHERE owner_user_id = ? AND fact_key = ?",
-            (owner_user_id, fact_key),
-        )
-        is_update = (await cursor.fetchone()) is not None
 
-        if not is_update:
+        async with self._write_lock:
+            db = await self._ensure_db()
             cursor = await db.execute(
-                "SELECT COUNT(*) as cnt FROM business_facts WHERE owner_user_id = ?", (owner_user_id,)
+                "SELECT 1 FROM business_facts WHERE owner_user_id = ? AND fact_key = ?",
+                (owner_user_id, fact_key),
             )
-            count = (await cursor.fetchone())["cnt"]
-            if count >= MAX_BUSINESS_FACTS_PER_OWNER:
-                return False
+            is_update = (await cursor.fetchone()) is not None
 
-        await db.execute(
-            """
-            INSERT INTO business_facts (owner_user_id, fact_key, fact_value)
-            VALUES (?, ?, ?)
-            ON CONFLICT(owner_user_id, fact_key) DO UPDATE SET fact_value = excluded.fact_value
-            """,
-            (owner_user_id, fact_key, fact_value),
-        )
-        await db.commit()
-        return True
+            if not is_update:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) as cnt FROM business_facts WHERE owner_user_id = ?", (owner_user_id,)
+                )
+                count = (await cursor.fetchone())["cnt"]
+                if count >= MAX_BUSINESS_FACTS_PER_OWNER:
+                    return False
+
+            await db.execute(
+                """
+                INSERT INTO business_facts (owner_user_id, fact_key, fact_value)
+                VALUES (?, ?, ?)
+                ON CONFLICT(owner_user_id, fact_key) DO UPDATE SET fact_value = excluded.fact_value
+                """,
+                (owner_user_id, fact_key, fact_value),
+            )
+            await db.commit()
+            return True
 
     async def delete_business_fact(self, owner_user_id: int, fact_key: str) -> bool:
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "DELETE FROM business_facts WHERE owner_user_id = ? AND fact_key = ?",
-            (owner_user_id, fact_key),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor = await db.execute(
+                "DELETE FROM business_facts WHERE owner_user_id = ? AND fact_key = ?",
+                (owner_user_id, fact_key),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def delete_business_fact_by_id(self, fact_id: int, owner_user_id: int) -> bool:
         """Удаление по числовому id — используется кнопками. owner_user_id в WHERE защищает
         от удаления чужого факта по угаданному/подставленному id в callback_data."""
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "DELETE FROM business_facts WHERE id = ? AND owner_user_id = ?",
-            (fact_id, owner_user_id),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
 
-    # --- Правила по ключевым словам ---
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor = await db.execute(
+                "DELETE FROM business_facts WHERE id = ? AND owner_user_id = ?",
+                (fact_id, owner_user_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+        # --- Правила по ключевым словам ---
 
     async def get_business_keyword_rules(self, owner_user_id: int) -> list[dict]:
         db = await self._ensure_db()
@@ -1197,54 +1265,60 @@ class UserStorage:
         """Сохраняет/обновляет правило. rule_type: 'template' (готовый ответ без Gemini)
         или 'hint' (подсказка, добавляемая в промпт). Возвращает False при достижении лимита
         MAX_BUSINESS_KEYWORD_RULES_PER_OWNER для новой записи."""
-        if rule_type not in ("template", "hint"):
-            raise ValueError(f"Некорректный rule_type: {rule_type!r}, ожидается 'template' или 'hint'")
 
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "SELECT 1 FROM business_keyword_rules WHERE owner_user_id = ? AND keyword = ?",
-            (owner_user_id, keyword),
-        )
-        is_update = (await cursor.fetchone()) is not None
+        async with self._write_lock:
+            if rule_type not in ("template", "hint"):
+                raise ValueError(f"Некорректный rule_type: {rule_type!r}, ожидается 'template' или 'hint'")
 
-        if not is_update:
+            db = await self._ensure_db()
             cursor = await db.execute(
-                "SELECT COUNT(*) as cnt FROM business_keyword_rules WHERE owner_user_id = ?", (owner_user_id,)
+                "SELECT 1 FROM business_keyword_rules WHERE owner_user_id = ? AND keyword = ?",
+                (owner_user_id, keyword),
             )
-            count = (await cursor.fetchone())["cnt"]
-            if count >= MAX_BUSINESS_KEYWORD_RULES_PER_OWNER:
-                return False
+            is_update = (await cursor.fetchone()) is not None
 
-        await db.execute(
-            """
-            INSERT INTO business_keyword_rules (owner_user_id, keyword, rule_type, content)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(owner_user_id, keyword) DO UPDATE SET
-                rule_type = excluded.rule_type,
-                content = excluded.content
-            """,
-            (owner_user_id, keyword, rule_type, content),
-        )
-        await db.commit()
-        return True
+            if not is_update:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) as cnt FROM business_keyword_rules WHERE owner_user_id = ?", (owner_user_id,)
+                )
+                count = (await cursor.fetchone())["cnt"]
+                if count >= MAX_BUSINESS_KEYWORD_RULES_PER_OWNER:
+                    return False
+
+            await db.execute(
+                """
+                INSERT INTO business_keyword_rules (owner_user_id, keyword, rule_type, content)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(owner_user_id, keyword) DO UPDATE SET
+                    rule_type = excluded.rule_type,
+                    content = excluded.content
+                """,
+                (owner_user_id, keyword, rule_type, content),
+            )
+            await db.commit()
+            return True
 
     async def delete_business_keyword_rule(self, owner_user_id: int, keyword: str) -> bool:
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "DELETE FROM business_keyword_rules WHERE owner_user_id = ? AND keyword = ?",
-            (owner_user_id, keyword),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor = await db.execute(
+                "DELETE FROM business_keyword_rules WHERE owner_user_id = ? AND keyword = ?",
+                (owner_user_id, keyword),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def delete_business_keyword_rule_by_id(self, rule_id: int, owner_user_id: int) -> bool:
-        db = await self._ensure_db()
-        cursor = await db.execute(
-            "DELETE FROM business_keyword_rules WHERE id = ? AND owner_user_id = ?",
-            (rule_id, owner_user_id),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            cursor = await db.execute(
+                "DELETE FROM business_keyword_rules WHERE id = ? AND owner_user_id = ?",
+                (rule_id, owner_user_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
 
 DEFAULT_AVATAR_PERSONAS = [

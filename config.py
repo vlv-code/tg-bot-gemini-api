@@ -22,7 +22,7 @@ class Settings:
     available_models: list[str] = field(
         default_factory=lambda: _get_list(
             "AVAILABLE_MODELS",
-            "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.7-flash,gemini-3.5-flash,gemini-2.5-flash",
+            "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.6-flash,gemini-4-argon",
         )
     )
     default_model: str = os.getenv("DEFAULT_MODEL", "gemini-3.5-flash-lite")
@@ -52,11 +52,11 @@ class Settings:
     db_path: str = os.getenv("DB_PATH", "data/bot.db")
 
     # Модель для TTS генерации речи (gemini-2.5-flash-preview-tts)
-    tts_model: str = os.getenv("TTS_MODEL", "gemini-2.5-flash-preview-tts")
+    tts_model: str = os.getenv("TTS_MODEL", "gemini-3.8-flash-tts")
     available_tts_models: list[str] = field(
         default_factory=lambda: _get_list(
             "AVAILABLE_TTS_MODELS",
-            "gemini-2.5-flash-preview-tts,gemini-3.1-flash-tts-preview,gemini-2.5-pro-preview-tts,gemini-2.5-flash",
+            "gemini-3.8-flash-tts,gemini-3.8-flash-lite-tts",
         )
     )
 
@@ -87,6 +87,8 @@ class Settings:
     # Задержка (в секундах) перед запуском генерации TTS в инлайн-режиме (debounce при наборе текста)
     # Оптимально 0.5-1.0 сек, так как таймаут инлайн-запроса в клиентах Telegram всего ~4-5 сек
     inline_tts_debounce_seconds: float = float(os.getenv("INLINE_TTS_DEBOUNCE_SECONDS", "0.8"))
+    tts_dump_chat_id: int = int(os.getenv("TTS_DUMP_CHAT_ID", "0") or "0")
+    inline_buttons_ttl_seconds: int = int(os.getenv("INLINE_BUTTONS_TTL_SECONDS", "30") or "30")
 
 
 

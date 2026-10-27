@@ -2,6 +2,8 @@ from aiogram import Router
 
 from handlers.common import (
     gemini_client,
+    close_http_session,
+    get_http_session,
     global_queue,
     limiter,
     storage,
@@ -38,5 +40,7 @@ __all__ = [
     "gemini_client",
     "user_locks",
     "global_queue",
+    "get_http_session",
+    "close_http_session",
 ]
 

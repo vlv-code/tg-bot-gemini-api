@@ -45,6 +45,12 @@ class AccessMiddleware(BaseMiddleware):
         allowed = await self.storage.is_user_allowed(user.id)
         if not allowed:
             logger.info("Отклонён доступ для user_id=%s (не разрешён в белом списке)", user.id)
+            cb = getattr(event, "callback_query", None)
+            if cb is not None:
+                try:
+                    await cb.answer("⛔️ Доступ к боту ограничен.", show_alert=False)
+                except Exception:
+                    pass
             return None  # молча игнорируем чужих
 
         return await handler(event, data)

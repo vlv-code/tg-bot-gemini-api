@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import time
 import unittest
 from unittest.mock import patch
@@ -62,6 +62,23 @@ class TestRateLimiter(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(status.allowed)
             self.assertEqual(status.used_minute, 0)
             self.assertEqual(status.used_day, 2)
+
+    async def test_concurrent_hits_and_checks(self):
+        limiter = RateLimiter(per_minute=50, per_day=100)
+
+        async def worker(uid: int):
+            for _ in range(5):
+                await limiter.check(uid)
+                await limiter.hit(uid)
+
+        # 10 параллельных корутин пишут одновременно
+        tasks = [worker(500 + i % 2) for i in range(10)]
+        await asyncio.gather(*tasks)
+
+        status0 = await limiter.check(500)
+        status1 = await limiter.check(501)
+        self.assertEqual(status0.used_minute, 25)
+        self.assertEqual(status1.used_minute, 25)
 
 
 if __name__ == "__main__":

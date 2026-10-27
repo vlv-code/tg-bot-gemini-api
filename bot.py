@@ -6,15 +6,16 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import BotCommand
 
 from config import settings
-from handlers import router, storage
+from handlers import close_http_session, router, storage
 from middlewares import AccessMiddleware
 
 BOT_COMMANDS = [
     BotCommand(command="menu", description="Главное меню настроек и моделей"),
     BotCommand(command="start", description="Запустить бота и открыть меню"),
     BotCommand(command="help", description="ℹ️ Справка и краткое руководство по боту"),
-    BotCommand(command="avatar", description="🎭 Режим Аватара: выбор и настройка Личностей"),
-    BotCommand(command="avatars", description="🎭 Каталог Личностей Аватара (Бро, Бизнес...)"),
+    BotCommand(command="avatar", description="🎭 Ответить в стиле Аватара (реплай или текст)"),
+    BotCommand(command="avatars", description="🎭 Управление личностями и промптом Аватара"),
+    BotCommand(command="q", description="🎭 Режим Аватара: ответ от 1-го лица (/q или /avatar)"),
     BotCommand(command="prompt", description="🥊 Настроить/изменить промпт Stand-режима"),
     BotCommand(command="prompts", description="🥊 Каталог промптов и ролей Stand-режима"),
     BotCommand(command="voice", description="🎙 Stand-режим: вопрос и ответ голосом"),
@@ -59,6 +60,7 @@ async def main() -> None:
         if bot is not None:
             await bot.session.close()
         await storage.close()
+        await close_http_session()
 
 
 if __name__ == "__main__":

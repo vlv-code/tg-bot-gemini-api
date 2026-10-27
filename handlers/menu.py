@@ -58,6 +58,14 @@ async def cmd_menu(message: Message) -> None:
         chat_title=chat_title,
         chat_type=message.chat.type,
     )
+    if message.text and "init_tts" in message.text:
+        await message.answer(
+            "🎙 <b>Озвучка для инлайн-режима успешно активирована!</b>\n"
+            "Теперь бот может отправлять вам аудиофайлы. Можете вернуться в чат и использовать "
+            "<code>@bot_username /tts</code> или <code>@bot_username ~текст</code>.",
+            parse_mode="HTML",
+        )
+
     state = await storage.get_settings(user_id)
     is_admin = await storage.is_user_admin(user_id)
     await message.answer(

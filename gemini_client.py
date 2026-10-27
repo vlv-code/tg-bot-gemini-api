@@ -1,4 +1,4 @@
-"""Тонкая обёртка над google-genai с поддержкой мультимодальности и TTS.
+﻿"""Тонкая обёртка над google-genai с поддержкой мультимодальности и TTS.
 
 Каждый вызов ask() создаёт новую chat-сессию с историей, переданной
 вызывающим кодом (хранится в storage.py).
@@ -38,11 +38,17 @@ class GeminiClient:
         api_key: str,
         default_system_prompt: str = "",
         default_voice: str = "Aoede",
-        default_tts_model: str = "gemini-3.1-flash-tts-preview",
+        default_tts_model: str = "gemini-3.8-flash-tts",
     ) -> None:
         self._client = genai.Client(
             api_key=api_key,
-            http_options=types.HttpOptions(timeout=120_000),
+            http_options=types.HttpOptions(
+                timeout=120_000,
+                retry_options=types.HttpRetryOptions(
+                    attempts=3,
+                    http_status_codes=[503, 504],
+                ),
+            ),
         )
         self.default_system_prompt = default_system_prompt
         self.default_voice = default_voice
@@ -100,7 +106,7 @@ class GeminiClient:
 
         is_audio_model = "tts" in model.lower() or "audio" in model.lower()
         if want_audio and is_audio_model:
-            modalities = ["AUDIO"] if "preview-tts" in model.lower() else ["AUDIO", "TEXT"]
+            modalities = ["AUDIO"] if "tts" in model.lower() else ["AUDIO", "TEXT"]
             config_kwargs["response_modalities"] = modalities
             config_kwargs["speech_config"] = types.SpeechConfig(
                 voice_config=types.VoiceConfig(
@@ -188,9 +194,8 @@ class GeminiClient:
         if self.default_tts_model and self.default_tts_model not in models_to_try:
             models_to_try.append(self.default_tts_model)
         for candidate in (
-            "gemini-2.5-flash-preview-tts",
-            "gemini-3.1-flash-tts-preview",
-            "gemini-2.5-pro-preview-tts",
+            "gemini-3.8-flash-tts",
+            "gemini-3.8-flash-lite-tts",
         ):
             if candidate not in models_to_try:
                 models_to_try.append(candidate)
@@ -267,7 +272,7 @@ def build_gemini_client(
     api_key: str,
     default_system_prompt: str = "",
     default_voice: str = "Aoede",
-    default_tts_model: str = "gemini-3.1-flash-tts-preview",
+    default_tts_model: str = "gemini-3.8-flash-tts",
 ) -> GeminiClient:
     return GeminiClient(
         api_key=api_key,

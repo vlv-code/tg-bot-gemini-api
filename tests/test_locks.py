@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import unittest
 
 from locks import GlobalQueueManager, UserLocks
@@ -16,6 +16,16 @@ class TestUserLocks(unittest.IsolatedAsyncioTestCase):
         lock1 = locks.get(10)
         lock2 = locks.get(20)
         self.assertIsNot(lock1, lock2)
+
+    async def test_composite_key_locks(self):
+        locks = UserLocks()
+        lock_owner_chat1 = locks.get((10, 100))
+        lock_owner_chat1_again = locks.get((10, 100))
+        lock_owner_chat2 = locks.get((10, 200))
+        lock_owner_plain = locks.get(10)
+        self.assertIs(lock_owner_chat1, lock_owner_chat1_again)
+        self.assertIsNot(lock_owner_chat1, lock_owner_chat2)
+        self.assertIsNot(lock_owner_chat1, lock_owner_plain)
 
 
 class TestGlobalQueueManager(unittest.IsolatedAsyncioTestCase):

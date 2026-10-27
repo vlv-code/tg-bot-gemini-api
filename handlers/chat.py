@@ -1,10 +1,11 @@
 import io
+import os
 import logging
 from typing import Optional, Union
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji
 from google.genai import types
 
 from handlers.common import (
@@ -15,11 +16,77 @@ from handlers.common import (
     _process_user_turn,
     limiter,
     try_download_image_from_url,
+    ForwardedContext,
+    get_forwarded_context,
+    save_forwarded_context,
 )
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+MAX_DOCUMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ
+ALLOWED_DOCUMENT_MIME_PREFIXES = ("text/", "image/", "audio/")
+ALLOWED_DOCUMENT_MIME_TYPES = {
+    "application/pdf",
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/x-python",
+    "application/csv",
+}
+ALLOWED_DOCUMENT_EXTENSIONS = {
+    ".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml",
+    ".pdf", ".js", ".py", ".html", ".htm", ".css", ".ts",
+    ".png", ".jpg", ".jpeg", ".webp", ".mp3", ".ogg", ".wav", ".m4a"
+}
+
+
+class DocumentValidationError(Exception):
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
+
+
+def _validate_document(doc) -> Optional[str]:
+    """Проверяет размер и MIME-тип документа до скачивания в оперативную память.
+    
+    Возвращает строку с описанием ошибки, либо None, если документ валиден.
+    """
+    if not doc:
+        return "❌ Файл не прикреплён."
+
+    file_size = getattr(doc, "file_size", None)
+    if file_size is None:
+        return "❌ Не удалось определить размер файла."
+    if file_size > MAX_DOCUMENT_SIZE_BYTES:
+        mb = round(file_size / (1024 * 1024), 1)
+        return f"❌ Файл слишком большой ({mb} МБ). Максимальный размер документа: 15 МБ."
+
+    mime_type = (getattr(doc, "mime_type", None) or "").lower().strip()
+    file_name = (getattr(doc, "file_name", "") or "").lower().strip()
+    _, ext = os.path.splitext(file_name)
+
+    if mime_type:
+        if any(mime_type.startswith(prefix) for prefix in ALLOWED_DOCUMENT_MIME_PREFIXES):
+            return None
+        if mime_type in ALLOWED_DOCUMENT_MIME_TYPES:
+            return None
+        if mime_type == "application/octet-stream" and ext in ALLOWED_DOCUMENT_EXTENSIONS:
+            return None
+        return (
+            f"❌ Неподдерживаемый тип файла ({mime_type}). "
+            "Поддерживаются текстовые файлы, PDF, код, изображения и аудио."
+        )
+
+    if ext in ALLOWED_DOCUMENT_EXTENSIONS:
+        return None
+
+    return (
+        f"❌ Неподдерживаемый тип файла ({ext or 'неизвестный формат'}). "
+        "Поддерживаются текстовые файлы, PDF, код, изображения и аудио."
+    )
+
 
 
 async def _build_reply_payload(
@@ -58,6 +125,9 @@ async def _build_reply_payload(
 
     if replied and replied.document:
         doc = replied.document
+        val_err = _validate_document(doc)
+        if val_err:
+            raise DocumentValidationError(val_err)
         file_io = io.BytesIO()
         await message.bot.download(doc.file_id, destination=file_io)
         doc_part = types.Part.from_bytes(
@@ -84,6 +154,9 @@ async def _build_reply_payload(
 
     if replied and (replied.voice or replied.audio):
         media = replied.voice or replied.audio
+        if getattr(media, "file_size", None) and media.file_size > MAX_DOCUMENT_SIZE_BYTES:
+            mb = round(media.file_size / (1024 * 1024), 1)
+            raise DocumentValidationError(f"❌ Аудиофайл слишком большой ({mb} МБ). Максимальный размер: 15 МБ.")
         file_io = io.BytesIO()
         await message.bot.download(media.file_id, destination=file_io)
         audio_part = types.Part.from_bytes(
@@ -169,7 +242,11 @@ async def cmd_voice(message: Message) -> None:
     query_text = args[1].strip() if len(args) > 1 else ""
 
     replied_text, replied = _extract_reply_info(message)
-    reply_payload = await _build_reply_payload(message, replied, replied_text, query_text)
+    try:
+        reply_payload = await _build_reply_payload(message, replied, replied_text, query_text)
+    except DocumentValidationError as err:
+        await message.answer(err.message)
+        return
     if reply_payload:
         content_input, history_text = reply_payload
         await _process_user_turn(
@@ -214,7 +291,11 @@ async def cmd_text(message: Message) -> None:
     query_text = args[1].strip() if len(args) > 1 else ""
 
     replied_text, replied = _extract_reply_info(message)
-    reply_payload = await _build_reply_payload(message, replied, replied_text, query_text)
+    try:
+        reply_payload = await _build_reply_payload(message, replied, replied_text, query_text)
+    except DocumentValidationError as err:
+        await message.answer(err.message)
+        return
     if reply_payload:
         content_input, history_text = reply_payload
         await _process_user_turn(
@@ -259,7 +340,11 @@ async def cmd_q(message: Message) -> None:
     clean_text = args[1].strip() if len(args) > 1 else ""
 
     replied_text, replied = _extract_reply_info(message)
-    reply_payload = await _build_reply_payload(message, replied, replied_text, clean_text, is_quick=True)
+    try:
+        reply_payload = await _build_reply_payload(message, replied, replied_text, clean_text, is_quick=True)
+    except DocumentValidationError as err:
+        await message.answer(err.message)
+        return
     if reply_payload:
         content_input, history_text = reply_payload
         await _process_user_turn(
@@ -279,6 +364,37 @@ async def cmd_q(message: Message) -> None:
             "• Бот выступает вашим текстовым суфлёром и пишет <b>готовый ответ от 1-го лица</b> («я», «мне») без цитирования и лишних фраз.\n"
             "• Управление личностями: <code>/avatars</code> (Бро, Бизнес, Сарказм, Краткий, Флирт и свои).",
             parse_mode="HTML",
+        )
+        return
+
+    user_id = message.from_user.id
+    fwd_ctx = get_forwarded_context(user_id, consume=True)
+    if fwd_ctx:
+        if fwd_ctx.notification_message_id:
+            try:
+                await message.bot.delete_message(chat_id=user_id, message_id=fwd_ctx.notification_message_id)
+            except Exception:
+                pass
+        prompt = clean_text or "Ответь на это сообщение."
+        interlocutor_block = (
+            f"INTERLOCUTOR'S MESSAGE IN CHAT (from {fwd_ctx.sender_name}):\n\"\"\"\n{fwd_ctx.text}\n\"\"\"\n\n"
+            f"USER DRAFT / INTENT TO BE SENT TO CHAT PARTNER:\n\"\"\"\n{prompt}\n\"\"\"\n\n"
+            "GHOSTWRITER INSTRUCTION:\n"
+            "1. Formulate a ready-to-send reply in the first person ('I', 'me') to the interlocutor matching the conversation language.\n"
+            "2. Strictly NEVER respond to or acknowledge the user ('Sure', 'Will do'). Output ONLY the final message."
+        )
+        if fwd_ctx.media_bytes and fwd_ctx.mime_type:
+            part = types.Part.from_bytes(data=fwd_ctx.media_bytes, mime_type=fwd_ctx.mime_type)
+            content_input = [part, interlocutor_block]
+        else:
+            content_input = interlocutor_block
+
+        await _process_user_turn(
+            message=message,
+            content_input=content_input,
+            history_text=f"[Из пересланного от {fwd_ctx.sender_name}] {prompt}",
+            no_quote=True,
+            use_quick_prompt=True,
         )
         return
 
@@ -313,6 +429,110 @@ async def cmd_q(message: Message) -> None:
     )
 
 
+
+# --- Context Bridge: Пересылка сообщений в ЛС для захвата контекста ---
+
+@router.message(F.chat.type == "private", F.forward_origin)
+async def handle_forwarded_message(message: Message) -> None:
+    """Захватывает пересланное сообщение в ЛС в буфер ForwardedContext на 3 минуты."""
+    user_id = message.from_user.id
+    sender_name = "Собеседник"
+    origin = message.forward_origin
+    if origin:
+        if getattr(origin, "sender_user", None):
+            sender_name = origin.sender_user.full_name
+        elif getattr(origin, "sender_user_name", None):
+            sender_name = origin.sender_user_name
+        elif getattr(origin, "chat", None):
+            sender_name = origin.chat.title or "Канал/Группа"
+
+    text = (message.text or message.caption or "").strip()
+    media_bytes: Optional[bytes] = None
+    mime_type: Optional[str] = None
+
+    if message.photo:
+        photo = message.photo[-1]
+        file_io = io.BytesIO()
+        await message.bot.download(photo.file_id, destination=file_io)
+        media_bytes = file_io.getvalue()
+        mime_type = "image/jpeg"
+    elif message.voice or message.audio:
+        aud = message.voice or message.audio
+        if getattr(aud, "file_size", None) and aud.file_size > MAX_DOCUMENT_SIZE_BYTES:
+            await message.answer("⚠️ Аудиофайл превышает 15 МБ, контекст сохранён без аудио.")
+        else:
+            file_io = io.BytesIO()
+            await message.bot.download(aud.file_id, destination=file_io)
+            media_bytes = file_io.getvalue()
+            mime_type = aud.mime_type or ("audio/ogg" if message.voice else "audio/mp3")
+    elif message.document:
+        doc = message.document
+        val_err = _validate_document(doc)
+        if not val_err:
+            file_io = io.BytesIO()
+            await message.bot.download(doc.file_id, destination=file_io)
+            media_bytes = file_io.getvalue()
+            mime_type = doc.mime_type or "application/octet-stream"
+
+    ctx = ForwardedContext(
+        text=text,
+        sender_name=sender_name,
+        media_bytes=media_bytes,
+        mime_type=mime_type,
+    )
+    save_forwarded_context(user_id, ctx)
+
+    try:
+        await message.react([ReactionTypeEmoji(emoji="👀")])
+    except Exception:
+        pass
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🥊 Разобрать сразу в Stand", callback_data="fwd_stand_now")]
+        ]
+    )
+    preview = f"\n<blockquote>{text[:150]}{'…' if len(text) > 150 else ''}</blockquote>" if text else ""
+    sent = await message.answer(
+        f"👀 <b>Контекст от {sender_name} схвачен на 3 минуты!</b>{preview}\n\n"
+        "Теперь вы можете:\n"
+        "• Перейти в нужный чат и набрать <code>@bot_username ваш черновик</code> для ответа через Аватар.\n"
+        "• Написать свой вопрос прямо сюда следующим сообщением.\n"
+        "• Или нажать кнопку ниже, чтобы разобрать это сообщение прямо сейчас.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    ctx.notification_message_id = sent.message_id
+
+
+@router.callback_query(F.data == "fwd_stand_now")
+async def cb_fwd_stand_now(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    ctx = get_forwarded_context(user_id, consume=True)
+    if not ctx:
+        await callback.answer("Время действия контекста истекло.", show_alert=True)
+        return
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.answer("Разбираю... 🥊")
+    prompt_text = f"Проанализируй пересланное сообщение от {ctx.sender_name}:\n{ctx.text}"
+    if ctx.media_bytes and ctx.mime_type:
+        part = types.Part.from_bytes(data=ctx.media_bytes, mime_type=ctx.mime_type)
+        content_input = [part, prompt_text]
+    else:
+        content_input = prompt_text
+
+    await _process_user_turn(
+        message=callback.message,
+        content_input=content_input,
+        history_text=f"[Пересланное от {ctx.sender_name}] {ctx.text[:80]}",
+        user_id_override=user_id,
+    )
+
 # --- Обработчики входящих сообщений (текст, фото, голос, документы) ---
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -321,13 +541,41 @@ async def handle_text(message: Message) -> None:
     clean_text = clean_text or message.text
 
     replied_text, replied = _extract_reply_info(message)
-    reply_payload = await _build_reply_payload(message, replied, replied_text, clean_text)
+    try:
+        reply_payload = await _build_reply_payload(message, replied, replied_text, clean_text)
+    except DocumentValidationError as err:
+        await message.answer(err.message)
+        return
     if reply_payload:
         content_input, history_text = reply_payload
         await _process_user_turn(
             message=message,
             content_input=content_input,
             history_text=history_text,
+            force_voice_reply=force_voice,
+            force_text_only=force_text,
+        )
+        return
+
+    user_id = message.from_user.id
+    fwd_ctx = get_forwarded_context(user_id, consume=True)
+    if fwd_ctx:
+        if fwd_ctx.notification_message_id:
+            try:
+                await message.bot.delete_message(chat_id=user_id, message_id=fwd_ctx.notification_message_id)
+            except Exception:
+                pass
+        stand_text = f"Контекст пересланного сообщения от {fwd_ctx.sender_name}:\n«««\n{fwd_ctx.text}\n»»»\n\nВопрос:\n{clean_text}"
+        if fwd_ctx.media_bytes and fwd_ctx.mime_type:
+            part = types.Part.from_bytes(data=fwd_ctx.media_bytes, mime_type=fwd_ctx.mime_type)
+            content_input = [part, stand_text]
+        else:
+            content_input = stand_text
+
+        await _process_user_turn(
+            message=message,
+            content_input=content_input,
+            history_text=f"[К пересланному от {fwd_ctx.sender_name}] {clean_text}",
             force_voice_reply=force_voice,
             force_text_only=force_text,
         )
@@ -389,6 +637,12 @@ async def handle_photo(message: Message) -> None:
 
 @router.message(F.voice | F.audio)
 async def handle_voice(message: Message) -> None:
+    media = message.voice or message.audio
+    if getattr(media, "file_size", None) and media.file_size > MAX_DOCUMENT_SIZE_BYTES:
+        mb = round(media.file_size / (1024 * 1024), 1)
+        await message.answer(f"❌ Аудиофайл слишком большой ({mb} МБ). Максимальный размер: 15 МБ.")
+        return
+
     user_id = message.from_user.id
     limit_status = await limiter.check(user_id)
     if not limit_status.allowed:
@@ -423,6 +677,12 @@ async def handle_voice(message: Message) -> None:
 
 @router.message(F.document)
 async def handle_document(message: Message) -> None:
+    doc = message.document
+    val_err = _validate_document(doc)
+    if val_err:
+        await message.answer(val_err)
+        return
+
     user_id = message.from_user.id
     limit_status = await limiter.check(user_id)
     if not limit_status.allowed:

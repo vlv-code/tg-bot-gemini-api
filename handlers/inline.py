@@ -16,12 +16,14 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedVoice,
+    InlineQueryResultsButton,
     InputTextMessageContent,
 )
 
 from audio import convert_gemini_audio
 from config import settings
 from handlers.common import (
+    get_forwarded_context,
     URL_REGEX,
     InlineSession,
     _active_inline_tts_tasks,
@@ -44,6 +46,22 @@ router = Router()
 
 
 # --- Инлайн-режим (карточки Stand, Avatar, TTS) ---
+
+def _extract_tts_inline_text(raw_query: str) -> Optional[str]:
+    """Извлекает текст для озвучки при наличии префиксов ~ (даже слитно), /tts, tts, /гс, гс."""
+    q = raw_query.strip()
+    if not q:
+        return None
+    if q.startswith("~"):
+        return q[1:].strip()
+    lower_q = q.lower()
+    for prefix in ("/tts", "tts", "/гс", "гс"):
+        if lower_q == prefix:
+            return ""
+        if lower_q.startswith(prefix + " "):
+            return q[len(prefix) + 1:].strip()
+    return None
+
 
 @router.inline_query()
 async def handle_inline(query: InlineQuery) -> None:
@@ -76,17 +94,17 @@ async def handle_inline(query: InlineQuery) -> None:
         )
         return
 
-    # Режим 1: Озвучка текста (/tts или tts) -> нативное голосовое сообщение в чат
-    if raw_query.lower().startswith(("/tts", "tts")):
-        parts = raw_query.split(maxsplit=1)
-        tts_text = parts[1].strip() if len(parts) > 1 else ""
+    # Режим 1: Озвучка текста (/tts, tts, ~текст, гс) -> нативное голосовое сообщение в чат
+    tts_extracted = _extract_tts_inline_text(raw_query)
+    if tts_extracted is not None:
+        tts_text = tts_extracted
         if not tts_text:
             article = InlineQueryResultArticle(
                 id="tts_hint",
                 title="🎙 Озвучить текст (TTS)",
-                description="Наберите: @bot_username /tts Текст для озвучки",
+                description="Наберите: @bot_username /tts или ~ Текст для озвучки",
                 input_message_content=InputTextMessageContent(
-                    message_text="Использование TTS: <code>@bot_username /tts Текст для озвучки</code>",
+                    message_text="Использование TTS: <code>@bot_username /tts Текст</code> или <code>@bot_username ~Текст</code>",
                     parse_mode="HTML",
                 ),
             )
@@ -175,34 +193,50 @@ async def handle_inline(query: InlineQuery) -> None:
             audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
             voice_file = BufferedInputFile(audio_data, filename=audio_filename)
 
-            # Бесшумный upload на серверы Telegram для получения voice_file_id
-            target_chat_id = user_id
-            try:
-                sent_msg = await query.bot.send_voice(
-                    chat_id=target_chat_id,
-                    voice=voice_file,
-                    disable_notification=True,
-                )
-            except Exception:
-                if settings.admin_ids:
-                    target_chat_id = settings.admin_ids[0]
+            # Загрузка на серверы Telegram для получения voice_file_id
+            file_id: Optional[str] = None
+            if settings.tts_dump_chat_id:
+                try:
+                    sent_msg = await query.bot.send_voice(
+                        chat_id=settings.tts_dump_chat_id,
+                        voice=voice_file,
+                        disable_notification=True,
+                    )
+                    file_id = sent_msg.voice.file_id
                     try:
-                        sent_msg = await query.bot.send_voice(
-                            chat_id=target_chat_id,
-                            voice=voice_file,
-                            disable_notification=True,
-                        )
-                    except Exception as exc2:
-                        logger.warning("Не удалось выполнить silent upload voice суперадмину: %s", exc2)
-                        return
-                else:
-                    return
+                        await query.bot.delete_message(chat_id=settings.tts_dump_chat_id, message_id=sent_msg.message_id)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logger.warning("Не удалось загрузить voice в TTS_DUMP_CHAT_ID: %s", exc)
 
-            file_id = sent_msg.voice.file_id
-            try:
-                await query.bot.delete_message(chat_id=target_chat_id, message_id=sent_msg.message_id)
-            except Exception:
-                pass
+            if not file_id:
+                try:
+                    sent_msg = await query.bot.send_voice(
+                        chat_id=user_id,
+                        voice=voice_file,
+                        disable_notification=True,
+                    )
+                    file_id = sent_msg.voice.file_id
+                    try:
+                        await query.bot.delete_message(chat_id=user_id, message_id=sent_msg.message_id)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logger.info("Не удалось отправить voice в ЛС user_id=%s: %s", user_id, exc)
+                    try:
+                        await query.answer(
+                            results=[],
+                            cache_time=0,
+                            is_personal=True,
+                            button=InlineQueryResultsButton(
+                                text="🎙 Нажмите Start, чтобы включить озвучку",
+                                start_parameter="init_tts",
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    return
 
             await storage.save_cached_tts_voice(
                 text=tts_text,
@@ -245,6 +279,9 @@ async def handle_inline(query: InlineQuery) -> None:
                 active_p_id = p["id"]
                 break
 
+    fwd_active = get_forwarded_context(user_id, consume=False) is not None
+    fwd_prefix = "📎 С контекстом • " if fwd_active else ""
+
     query_hash = hashlib.sha256(f"{clean_query}:{time.time()}".encode("utf-8")).hexdigest()[:16]
     prompt_short = clean_query[:65] + ("…" if len(clean_query) > 65 else "")
 
@@ -265,7 +302,7 @@ async def handle_inline(query: InlineQuery) -> None:
     stand_article = InlineQueryResultArticle(
         id=stand_sid,
         title=stand_title,
-        description=f"«{prompt_short}» • Ответ ИИ с цитатой",
+        description=f"{fwd_prefix}«{prompt_short}» • Ответ ИИ с цитатой",
         input_message_content=InputTextMessageContent(
             message_text=(
                 f"💬 <b>Запрос:</b>\n<blockquote>{html.escape(clean_query)}</blockquote>\n\n"
@@ -293,13 +330,13 @@ async def handle_inline(query: InlineQuery) -> None:
     fast_article = InlineQueryResultArticle(
         id=fast_sid,
         title=f"⚡️ Avatar: Быстро ({active_p_name})",
-        description=f"«{prompt_short}» • Отправить сразу от 1-го лица",
+        description=f"{fwd_prefix}«{prompt_short}» • Отправить сразу от 1-го лица",
         input_message_content=InputTextMessageContent(
-            message_text="⏳ <i>Генерирую сообщение от вашего лица...</i>",
+            message_text="✍️ <i>...</i>",
             parse_mode="HTML",
         ),
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{fast_sid}")]]
+            inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data="inl_noop")]]
         ),
     )
 
@@ -318,9 +355,9 @@ async def handle_inline(query: InlineQuery) -> None:
     prev_article = InlineQueryResultArticle(
         id=prev_sid,
         title=f"👁 Avatar: Предпросмотр ({active_p_name})",
-        description=f"«{prompt_short}» • С кнопками перегенерации и смены стиля",
+        description=f"{fwd_prefix}«{prompt_short}» • С кнопками перегенерации и смены стиля",
         input_message_content=InputTextMessageContent(
-            message_text=f"⏳ <i>Генерирую сообщение в стиле «{active_p_name}»...</i>",
+            message_text="✍️ <i>...</i>",
             parse_mode="HTML",
         ),
         reply_markup=InlineKeyboardMarkup(
@@ -350,13 +387,13 @@ async def handle_inline(query: InlineQuery) -> None:
             InlineQueryResultArticle(
                 id=p_sid,
                 title=f"⚡️ {p_title}",
-                description=f"«{prompt_short}» • Отправить сразу от 1-го лица",
+                description=f"{fwd_prefix}«{prompt_short}» • Отправить сразу от 1-го лица",
                 input_message_content=InputTextMessageContent(
-                    message_text=f"⏳ <i>Генерирую сообщение в стиле «{p_title}»...</i>",
+                    message_text="✍️ <i>...</i>",
                     parse_mode="HTML",
                 ),
                 reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data=f"inl_start:{p_sid}")]]
+                    inline_keyboard=[[InlineKeyboardButton(text="⏳ Генерация...", callback_data="inl_noop")]]
                 ),
             )
         )
@@ -386,7 +423,10 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
         return
 
     session_id = chosen.result_id
-    _run_background_task(
+    session = _inline_sessions.get(session_id)
+    if session and session.active_task and not session.active_task.done():
+        session.active_task.cancel()
+    task = _run_background_task(
         _execute_inline_generation(
             bot=chosen.bot,
             user_id=chosen.from_user.id,
@@ -395,6 +435,8 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
             raw_query_override=chosen.query.strip(),
         )
     )
+    if session:
+        session.active_task = task
 
 
 def _extract_callback_author(callback_data: str, session: Optional[InlineSession]) -> Optional[int]:
@@ -408,7 +450,7 @@ def _extract_callback_author(callback_data: str, session: Optional[InlineSession
 
 @router.callback_query(F.data == "inl_noop")
 async def cb_inl_noop(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await callback.answer("⏳ Генерация уже идёт...", show_alert=False)
 
 
 @router.callback_query(F.data.startswith("inl_start:"))
@@ -423,9 +465,13 @@ async def cb_inl_start(callback: CallbackQuery) -> None:
         await callback.answer("⛔️ Только автор сообщения может запустить генерацию!", show_alert=True)
         return
 
+    if session.active_task and not session.active_task.done():
+        await callback.answer("⏳ Уже генерируется, подождите немного...", show_alert=False)
+        return
+
     await callback.answer("Генерирую... ⏳")
     if callback.inline_message_id:
-        _run_background_task(
+        session.active_task = _run_background_task(
             _execute_inline_generation(
                 bot=callback.bot,
                 user_id=session.user_id,
@@ -454,7 +500,9 @@ async def cb_inl_regen(callback: CallbackQuery) -> None:
         return
 
     await callback.answer("Генерирую новый вариант... ⏳")
-    _run_background_task(
+    if session.active_task and not session.active_task.done():
+        session.active_task.cancel()
+    session.active_task = _run_background_task(
         _execute_inline_generation(
             bot=callback.bot,
             user_id=session.user_id,
@@ -504,7 +552,9 @@ async def cb_inl_style(callback: CallbackQuery) -> None:
     session.persona_prompt = next_p["prompt"]
 
     await callback.answer(f"Стиль изменён на: {next_title} 🎭")
-    _run_background_task(
+    if session.active_task and not session.active_task.done():
+        session.active_task.cancel()
+    session.active_task = _run_background_task(
         _execute_inline_generation(
             bot=callback.bot,
             user_id=session.user_id,
@@ -524,6 +574,8 @@ async def cb_inl_fix(callback: CallbackQuery) -> None:
         await callback.answer("⛔️ Только автор сообщения может зафиксировать текст!", show_alert=True)
         return
 
+    if session and session.cleanup_task and not session.cleanup_task.done():
+        session.cleanup_task.cancel()
     if callback.inline_message_id:
         try:
             await callback.bot.edit_message_reply_markup(
@@ -544,6 +596,12 @@ async def cb_inl_del(callback: CallbackQuery) -> None:
     if author_id is not None and callback.from_user.id != author_id and callback.from_user.id not in settings.admin_ids:
         await callback.answer("⛔️ Только автор сообщения может удалить его!", show_alert=True)
         return
+
+    if session and session.active_task and not session.active_task.done():
+        session.active_task.cancel()
+    if session and session.cleanup_task and not session.cleanup_task.done():
+        session.cleanup_task.cancel()
+    _inline_sessions.pop(session_id, None)
 
     if callback.inline_message_id:
         try:

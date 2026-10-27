@@ -1,4 +1,4 @@
-import html
+﻿import html
 import logging
 
 from aiogram import F, Router
@@ -111,10 +111,26 @@ async def cmd_prompt(message: Message) -> None:
 
 @router.message(Command("avatar", "avatars", "persona", "personas", "личность", "личности", "аватар", "аватары"))
 async def cmd_avatar(message: Message) -> None:
-    """Управление Личностями Аватара (/q)."""
+    """Управление Личностями Аватара или генерация ответа (/q)."""
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    cmd_name = parts[0].lstrip("/").split("@")[0].lower() if parts else "avatar"
+    is_avatar_reply_cmd = cmd_name in ("avatar", "аватар")
+
+    # Если вызов через /avatar с реплаем или цитатой — это всегда генерация ответа в Режиме Аватара (/q)
+    has_reply = bool(
+        message.reply_to_message
+        or getattr(message, "external_reply", None)
+        or getattr(message, "quote", None)
+    )
+    if is_avatar_reply_cmd and has_reply:
+        from handlers.chat import cmd_q
+        await cmd_q(message)
+        return
+
     user_id = message.from_user.id
     state = await storage.get_settings(user_id)
-    args = message.text.split(maxsplit=1)
+    args = parts
 
     if len(args) == 1:
         personas = await storage.get_all_personas(user_id)
@@ -164,6 +180,12 @@ async def cmd_avatar(message: Message) -> None:
         await storage.set_quick_prompt(user_id, matched["prompt"])
         title = matched.get("title") or matched["name"]
         await message.answer(f"Активирована личность: <b>{html.escape(title)}</b> 🎭", parse_mode="HTML")
+        return
+
+    # Если вызвано как /avatar с произвольным черновиком текста (без =) — делегируем в /q
+    if is_avatar_reply_cmd:
+        from handlers.chat import cmd_q
+        await cmd_q(message)
         return
 
     await storage.set_quick_prompt(user_id, raw_arg)

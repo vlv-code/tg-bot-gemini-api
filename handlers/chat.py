@@ -666,12 +666,14 @@ async def handle_voice(message: Message) -> None:
     content_input = [audio_part, prompt_text]
     history_text = f"[Голосовое сообщение] {prompt_text}"
 
+    user_state = await storage.get_settings(user_id)
     await _process_user_turn(
         message=message,
         content_input=content_input,
         history_text=history_text,
         force_voice_reply=True if not force_text else False,
         force_text_only=force_text,
+        model_override=user_state.stt_model or user_state.model,
     )
 
 

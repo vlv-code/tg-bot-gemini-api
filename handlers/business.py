@@ -178,9 +178,10 @@ async def _generate_secretary_reply(
                     "approach/phrasing meaningfully.]"
                 )
 
+            business_model = state.business_model or state.model
             try:
                 response = await gemini_client.ask(
-                    model=state.model,
+                    model=business_model,
                     history_turns=state.history,
                     message=message_input,
                     system_prompt=effective_prompt,
@@ -198,7 +199,7 @@ async def _generate_secretary_reply(
                 await storage.record_token_usage(
                     user_id=owner_user_id,
                     chat_id=chat_id,
-                    model=state.model,
+                    model=business_model,
                     prompt_tokens=response.prompt_tokens,
                     candidates_tokens=response.candidates_tokens,
                     total_tokens=response.total_tokens,

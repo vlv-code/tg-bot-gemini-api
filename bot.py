@@ -6,7 +6,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import BotCommand
 
 from config import settings
-from handlers import close_http_session, router, storage
+from gemini_client import sync_models_catalog
+from handlers import close_http_session, gemini_client, router, storage
 from middlewares import AccessMiddleware
 
 BOT_COMMANDS = [
@@ -30,6 +31,19 @@ BOT_COMMANDS = [
 ]
 
 
+async def start_models_sync_worker() -> None:
+    """Периодически раз в 24 часа синхронизирует список моделей с Google GenAI API."""
+    while True:
+        try:
+            stats = await sync_models_catalog(gemini_client, storage)
+            logging.info("Синхронизация каталога моделей завершена: %s", stats)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logging.warning("Ошибка периодической синхронизации моделей: %s", exc)
+        await asyncio.sleep(86400)
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -38,9 +52,13 @@ async def main() -> None:
     )
 
     bot: Bot | None = None
+    sync_task: asyncio.Task | None = None
     try:
         # Инициализируем базу данных SQLite
         await storage.init_db()
+
+        # Фоновая синхронизация моделей с Google GenAI API
+        sync_task = asyncio.create_task(start_models_sync_worker())
 
         # parse_mode на уровне бота не ставим: rich/plain режим выбирается
         # per-message в handlers.py в зависимости от настройки пользователя
@@ -57,6 +75,12 @@ async def main() -> None:
 
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
+        if sync_task is not None:
+            sync_task.cancel()
+            try:
+                await sync_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if bot is not None:
             await bot.session.close()
         await storage.close()

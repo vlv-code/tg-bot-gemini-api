@@ -19,6 +19,8 @@ from keyboards import (
     info_menu_keyboard,
     limits_keyboard,
     main_menu_keyboard,
+    mode_model_selector_keyboard,
+    models_hub_keyboard,
     models_keyboard,
     settings_keyboard,
     tts_menu_keyboard,
@@ -38,10 +40,36 @@ from handlers.common import (
     storage,
     user_locks,
 )
+from storage import UserState
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+MODE_NAMES = {
+    "stand": "🥊 Stand (чат)",
+    "avatar": "🎭 Avatar (/q)",
+    "business": "💼 Business (Secretary)",
+    "stt": "🎙 Voice-to-Text (STT)",
+    "tts": "🎧 Озвучка (TTS)",
+}
+
+
+def _render_models_hub_text(state: UserState) -> str:
+    stand = state.stand_model
+    avatar = state.avatar_model or state.model
+    business = state.business_model or state.model
+    stt = state.stt_model or state.model
+    tts = state.tts_model
+    return (
+        "🤖 <b>Управление моделями Gemini по режимам:</b>\n\n"
+        f"🥊 <b>Stand (Основной чат):</b> <code>{html.escape(stand)}</code>\n"
+        f"🎭 <b>Avatar (Режим /q, инлайн):</b> <code>{html.escape(avatar)}</code>\n"
+        f"💼 <b>Business (Secretary Mode):</b> <code>{html.escape(business)}</code>\n"
+        f"🎙 <b>Voice-to-Text (Распознавание):</b> <code>{html.escape(stt)}</code>\n"
+        f"🎧 <b>Озвучка (TTS):</b> <code>{html.escape(tts)}</code>\n\n"
+        "<i>Нажмите на нужный режим ниже, чтобы выбрать для него активную модель:</i>"
+    )
 
 
 # --- Команды навигации и меню ---
@@ -89,9 +117,9 @@ async def cmd_info(message: Message) -> None:
 async def cmd_model(message: Message) -> None:
     state = await storage.get_settings(message.from_user.id)
     await message.answer(
-        f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
+        _render_models_hub_text(state),
         parse_mode="HTML",
-        reply_markup=models_keyboard(state.model),
+        reply_markup=models_hub_keyboard(state),
     )
 
 
@@ -269,37 +297,117 @@ async def cb_menu_main(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "menu:business")
+async def cb_menu_business(callback: CallbackQuery) -> None:
+    from handlers.business import cb_business_menu
+
+    callback.data = "bizmenu:main"
+    await cb_business_menu(callback)
+
+
 @router.callback_query(F.data == "menu:model")
 async def cb_menu_model(callback: CallbackQuery) -> None:
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
-            f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(state.model)}</code>):",
+            _render_models_hub_text(state),
             parse_mode="HTML",
-            reply_markup=models_keyboard(state.model),
+            reply_markup=models_hub_keyboard(state),
         )
     except TelegramBadRequest:
         pass
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("pick_mode_model:"))
+async def cb_pick_mode_model(callback: CallbackQuery) -> None:
+    mode = callback.data.split(":", 1)[1]
+    state = await storage.get_settings(callback.from_user.id)
+    category = "tts" if mode == "tts" else "text"
+    available = await storage.get_available_models(category=category, enabled_only=True)
+
+    mode_current = {
+        "stand": state.stand_model,
+        "avatar": state.avatar_model or state.model,
+        "business": state.business_model or state.model,
+        "stt": state.stt_model or state.model,
+        "tts": state.tts_model,
+    }.get(mode, state.model)
+
+    mode_title = MODE_NAMES.get(mode, mode)
+    text = (
+        f"⚙️ <b>Выбор модели для режима {mode_title}:</b>\n\n"
+        f"Текущая активная модель: <code>{html.escape(mode_current)}</code>\n\n"
+        "<i>Выберите модель из списка актуальных:</i>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=mode_model_selector_keyboard(mode, mode_current, available),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_mode_model:"))
+async def cb_set_mode_model(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+    _, mode, model_id = parts
+    user_id = callback.from_user.id
+    category = "tts" if mode == "tts" else "text"
+    available = await storage.get_available_models(category=category, enabled_only=True)
+    available_ids = [m["model_id"] for m in available]
+
+    # Валидация модели
+    if (
+        model_id not in available_ids
+        and model_id not in settings.available_models
+        and model_id not in settings.available_tts_models
+    ):
+        await callback.answer("Модель недоступна или отключена", show_alert=True)
+        return
+
+    await storage.set_user_mode_model(user_id, mode, model_id)
+    if mode == "stand":
+        chat_id = callback.message.chat.id if callback.message else user_id
+        await storage.clear_history(user_id, chat_id=chat_id)
+
+    mode_title = MODE_NAMES.get(mode, mode)
+    text = (
+        f"⚙️ <b>Выбор модели для режима {mode_title}:</b>\n\n"
+        f"Текущая активная модель: <code>{html.escape(model_id)}</code>\n\n"
+        "<i>Выберите модель из списка актуальных:</i>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=mode_model_selector_keyboard(mode, model_id, available),
+        )
+    except TelegramBadRequest:
+        pass
+    clear_msg = " (история чата очищена)" if mode == "stand" else ""
+    await callback.answer(f"Модель для {mode_title} переключена на {model_id}{clear_msg}")
+
+
 @router.callback_query(F.data.startswith(("set_model:", "model:")))
 async def cb_set_model(callback: CallbackQuery) -> None:
     model = callback.data.split(":", 1)[1]
-    if model not in settings.available_models:
-        await callback.answer("Неизвестная модель", show_alert=True)
-        return
-
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message else user_id
-    await storage.set_model(user_id, model)
+    await storage.set_user_mode_model(user_id, "stand", model)
     await storage.clear_history(user_id, chat_id=chat_id)
-
+    state = await storage.get_settings(user_id)
     try:
         await callback.message.edit_text(
-            f"🤖 Выберите основную модель Gemini (текущая: <code>{html.escape(model)}</code>):",
+            _render_models_hub_text(state),
             parse_mode="HTML",
-            reply_markup=models_keyboard(model),
+            reply_markup=models_hub_keyboard(state),
         )
     except TelegramBadRequest:
         pass

@@ -7,8 +7,9 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from config import settings
+from gemini_client import sync_models_catalog
 from keyboards import admin_panel_keyboard, admin_users_keyboard
-from handlers.common import storage
+from handlers.common import gemini_client, storage
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,31 @@ async def cb_admin_toggle_whitelist(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
+
+
+@router.callback_query(F.data == "admin:sync_models")
+async def cb_admin_sync_models(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    if not await storage.is_user_admin(user_id):
+        await callback.answer("⛔️ Нет прав администратора", show_alert=True)
+        return
+
+    await callback.answer("🔄 Запрос актуальных моделей в Google API...")
+    stats = await sync_models_catalog(gemini_client, storage)
+    if stats.get("error"):
+        await callback.message.answer(f"⚠️ Ошибка синхронизации моделей: {html.escape(stats['error'])}")
+        return
+
+    res_text = (
+        f"✅ <b>Каталог моделей Google GenAI обновлён!</b>\n\n"
+        f"• Всего обнаружено: <b>{stats['total']}</b>\n"
+        f"• Текстовых (чат, стенд, аватар): <b>{stats['text']}</b>\n"
+        f"• Озвучка (TTS): <b>{stats['tts']}</b>\n"
+        f"• Генерация картинок (Imagen): <b>{stats['image_gen']}</b>\n"
+        f"• Векторные (Embeddings): <b>{stats['embed']}</b>\n\n"
+        "<i>Все модели доступны для выбора в меню /model</i>"
+    )
+    await callback.message.answer(res_text, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "admin:users")

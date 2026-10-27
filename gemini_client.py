@@ -1,4 +1,4 @@
-﻿"""Тонкая обёртка над google-genai с поддержкой мультимодальности и TTS.
+"""Тонкая обёртка над google-genai с поддержкой мультимодальности и TTS.
 
 Каждый вызов ask() создаёт новую chat-сессию с историей, переданной
 вызывающим кодом (хранится в storage.py).
@@ -8,7 +8,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional, Sequence, Union
+from typing import Any, Optional, Sequence, Union
 
 from google import genai
 from google.genai import types
@@ -288,6 +288,102 @@ class GeminiClient:
 
         raise GeminiError("Не удалось сгенерировать аудио из текста.")
 
+    async def fetch_and_classify_models(self) -> list[dict]:
+        """Получает список моделей из Google GenAI API и классифицирует их."""
+        result: list[dict] = []
+        try:
+            pager = await self._client.aio.models.list()
+            models_list = []
+            if hasattr(pager, "__aiter__"):
+                async for item in pager:
+                    models_list.append(item)
+            elif hasattr(pager, "__iter__"):
+                for item in pager:
+                    models_list.append(item)
+
+            for m in models_list:
+                raw_name = getattr(m, "name", "") or ""
+                mid = raw_name.replace("models/", "") if raw_name.startswith("models/") else raw_name
+                if not mid:
+                    continue
+
+                # Фильтрация устаревших чекпоинтов с датами и номерами версий gemini-...-001
+                if mid.startswith("gemini-") and re.search(r"-\d{3}$", mid):
+                    continue
+                if re.search(r"(-\d{8}$|-(202\d{5}))", mid):
+                    continue
+                if "legacy" in mid.lower() or "deprecated" in mid.lower():
+                    continue
+
+                disp = getattr(m, "display_name", "") or mid
+                desc = (getattr(m, "description", "") or "").lower()
+                methods = getattr(m, "supported_generation_methods", []) or []
+                if not isinstance(methods, (list, tuple, set)):
+                    methods = []
+
+                mid_lower = mid.lower()
+                if "tts" in mid_lower or "speech" in desc:
+                    category = "tts"
+                    input_mod = "text"
+                    output_mod = "audio"
+                    sort_order = 20
+                    icon = "🎧"
+                elif "imagen" in mid_lower or ("image" in mid_lower and "generate" in mid_lower):
+                    category = "image_gen"
+                    input_mod = "text"
+                    output_mod = "image"
+                    sort_order = 40
+                    icon = "🎨"
+                elif "embedding" in mid_lower or "embed" in mid_lower or "embedContent" in methods:
+                    category = "embed"
+                    input_mod = "text"
+                    output_mod = "vector"
+                    sort_order = 50
+                    icon = "📐"
+                elif "generateContent" in methods or ("gemini" in mid_lower and "tts" not in mid_lower):
+                    category = "text"
+                    input_mod = "text,image,audio,pdf"
+                    output_mod = "text"
+                    if "lite" in mid_lower:
+                        sort_order = 10
+                        icon = "⚡️"
+                    elif "flash" in mid_lower:
+                        sort_order = 20
+                        icon = "⚖️"
+                    elif "argon" in mid_lower or "pro" in mid_lower or "ultra" in mid_lower:
+                        sort_order = 30
+                        icon = "🧠"
+                    else:
+                        sort_order = 35
+                        icon = "🤖"
+                else:
+                    category = "other"
+                    input_mod = "text"
+                    output_mod = "text"
+                    sort_order = 90
+                    icon = "📦"
+
+                clean_disp = disp
+                if not clean_disp.startswith(icon):
+                    clean_disp = f"{icon} {clean_disp}"
+
+                result.append(
+                    {
+                        "model_id": mid,
+                        "display_name": clean_disp,
+                        "category": category,
+                        "input_modalities": input_mod,
+                        "output_modalities": output_mod,
+                        "is_enabled": 1,
+                        "sort_order": sort_order,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("Не удалось получить список моделей из Google GenAI API: %s", exc)
+            raise
+
+        return result
+
     @staticmethod
     def _friendly_message(exc: Exception) -> str:
         status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
@@ -325,5 +421,26 @@ def build_gemini_client(
         default_model=default_model,
         timeout_seconds=timeout_seconds,
     )
+
+
+async def sync_models_catalog(client: GeminiClient, storage: Any) -> dict:
+    """Запрашивает актуальные модели из Google GenAI API и синхронизирует их с БД."""
+    try:
+        models = await client.fetch_and_classify_models()
+        if models:
+            await storage.upsert_discovered_models(models)
+        stats = {
+            "total": len(models),
+            "text": sum(1 for m in models if m.get("category") == "text"),
+            "tts": sum(1 for m in models if m.get("category") == "tts"),
+            "image_gen": sum(1 for m in models if m.get("category") == "image_gen"),
+            "embed": sum(1 for m in models if m.get("category") == "embed"),
+        }
+        logger.info("Успешно синхронизирован каталог моделей: %s", stats)
+        return stats
+    except Exception as exc:
+        logger.warning("Ошибка при синхронизации каталога моделей: %s", exc)
+        return {"total": 0, "text": 0, "tts": 0, "image_gen": 0, "embed": 0, "error": str(exc)}
+
 
 

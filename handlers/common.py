@@ -571,6 +571,7 @@ async def _process_user_turn(
     no_quote: bool = False,
     use_quick_prompt: bool = False,
     user_id_override: Optional[int] = None,
+    model_override: Optional[str] = None,
 ) -> None:
     user_id = user_id_override if user_id_override is not None else message.from_user.id
     chat_id = message.chat.id
@@ -628,10 +629,14 @@ async def _process_user_turn(
                 else state.system_prompt
             )
 
+            target_model = model_override or (
+                (state.avatar_model or state.model) if use_quick_prompt else state.model
+            )
+
             async with action(bot=message.bot, chat_id=message.chat.id):
                 try:
                     response = await gemini_client.ask(
-                        model=state.model,
+                        model=target_model,
                         history_turns=state.history,
                         message=content_input,
                         system_prompt=effective_prompt,
@@ -656,7 +661,7 @@ async def _process_user_turn(
                     await storage.record_token_usage(
                         user_id=user_id,
                         chat_id=chat_id,
-                        model=state.model,
+                        model=target_model,
                         prompt_tokens=response.prompt_tokens,
                         candidates_tokens=response.candidates_tokens,
                         total_tokens=response.total_tokens,
@@ -858,10 +863,11 @@ async def _execute_inline_generation(
             else state.system_prompt
         )
 
+        target_model = (state.avatar_model or state.model) if is_quick else state.model
         try:
             async with global_queue.acquire(user_id, priority=priority):
                 response = await gemini_client.ask(
-                    model=state.model,
+                    model=target_model,
                     history_turns=[],
                     message=content_input,
                     system_prompt=effective_prompt,

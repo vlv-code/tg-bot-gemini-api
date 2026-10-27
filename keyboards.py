@@ -3,14 +3,16 @@ from typing import Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import settings
+from storage import UserState
 
 
 def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню бота со всеми разделами."""
     buttons = [
-        [InlineKeyboardButton(text="🤖 Модель Gemini", callback_data="menu:model")],
+        [InlineKeyboardButton(text="🤖 Модели Gemini (5 режимов)", callback_data="menu:model")],
         [InlineKeyboardButton(text="🎭 Личности Аватара", callback_data="menu:personas")],
         [InlineKeyboardButton(text="🥊 Промпты Stand-режима", callback_data="menu:prompts")],
+        [InlineKeyboardButton(text="💼 Бизнес-ассистент (Secretary)", callback_data="menu:business")],
         [InlineKeyboardButton(text="🎙 Настройки озвучки (TTS)", callback_data="menu:tts")],
         [InlineKeyboardButton(text="⚙️ Параметры чата и история", callback_data="menu:settings")],
         [InlineKeyboardButton(text="📊 Лимиты запросов", callback_data="menu:limits")],
@@ -34,6 +36,41 @@ def info_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(text="◀️ В главное меню", callback_data="menu:main")],
     ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def models_hub_keyboard(state: UserState) -> InlineKeyboardMarkup:
+    """Главный хаб управления моделями по 5 режимам."""
+    stand = state.stand_model
+    avatar = state.avatar_model or state.model
+    business = state.business_model or state.model
+    stt = state.stt_model or state.model
+    tts = state.tts_model
+
+    buttons = [
+        [InlineKeyboardButton(text=f"🥊 Stand (чат): {stand}", callback_data="pick_mode_model:stand")],
+        [InlineKeyboardButton(text=f"🎭 Avatar (/q): {avatar}", callback_data="pick_mode_model:avatar")],
+        [InlineKeyboardButton(text=f"💼 Business (Secretary): {business}", callback_data="pick_mode_model:business")],
+        [InlineKeyboardButton(text=f"🎙 Voice-to-Text (STT): {stt}", callback_data="pick_mode_model:stt")],
+        [InlineKeyboardButton(text=f"🎧 Озвучка TTS: {tts}", callback_data="pick_mode_model:tts")],
+        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="menu:main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def mode_model_selector_keyboard(
+    mode: str, current_model: str, available_models: list[dict]
+) -> InlineKeyboardMarkup:
+    """Клавиатура выбора модели для конкретного режима."""
+    buttons = []
+    for m in available_models:
+        mid = m["model_id"]
+        disp = m.get("display_name", mid)
+        is_current = (mid == current_model)
+        label = f"✅ {disp}" if is_current else disp
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"set_mode_model:{mode}:{mid}")])
+
+    buttons.append([InlineKeyboardButton(text="◀️ Назад к режимам", callback_data="menu:model")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -277,6 +314,7 @@ def admin_panel_keyboard(whitelist_enabled: bool) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="👥 Список разрешённых юзеров", callback_data="admin:users")],
         [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="admin:add_user_hint")],
+        [InlineKeyboardButton(text="🔄 Синхронизировать модели Google", callback_data="admin:sync_models")],
         [InlineKeyboardButton(text=wl_label, callback_data="admin:toggle_whitelist")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu:main")],
     ]
@@ -319,6 +357,7 @@ def business_menu_keyboard(facts_count: int, rules_count: int, autoreply_count: 
             [InlineKeyboardButton(text=f"🔑 Ключевые слова ({rules_count})", callback_data="bizmenu:keywords")],
             [InlineKeyboardButton(text=f"🔁 Авто-ответ по чатам ({autoreply_count})", callback_data="bizmenu:chats")],
             [InlineKeyboardButton(text="🔌 Статус подключений", callback_data="bizmenu:status")],
+            [InlineKeyboardButton(text="◀️ В главное меню", callback_data="menu:main")],
         ]
     )
 

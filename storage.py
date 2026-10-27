@@ -35,7 +35,14 @@ class UserState:
     quick_prompt: str = ""
     tts_model: str = "gemini-3.8-flash-tts"
     tts_voice: str = "Aoede"
+    avatar_model: Optional[str] = None
+    business_model: Optional[str] = None
+    stt_model: Optional[str] = None
     history: list[Turn] = field(default_factory=list)
+
+    @property
+    def stand_model(self) -> str:
+        return self.model
 
 
 class UserStorage:
@@ -108,6 +115,9 @@ class UserStorage:
                 await db.execute(
                     "ALTER TABLE users ADD COLUMN quick_prompt TEXT NOT NULL DEFAULT ''"
                 )
+            for col in ("avatar_model", "business_model", "stt_model"):
+                if col not in columns:
+                    await db.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT NULL")
 
             # Миграция: добавляем chat_id и mode в history, если их ещё нет
             cursor = await db.execute("PRAGMA table_info(history)")
@@ -228,6 +238,24 @@ class UserStorage:
                 """
             )
 
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discovered_models (
+                    model_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    input_modalities TEXT NOT NULL,
+                    output_modalities TEXT NOT NULL,
+                    is_enabled INTEGER DEFAULT 1,
+                    sort_order INTEGER DEFAULT 100,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_discovered_models_cat ON discovered_models (category, is_enabled, sort_order)"
+            )
+
             # Secretary Mode / Telegram Business: подключения бота к личным аккаунтам
             await db.execute(
                 """
@@ -319,8 +347,8 @@ class UserStorage:
         async with self._write_lock:
             await db.execute(
                 """
-                INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice)
-                VALUES (?, ?, 1, 0, '', '', ?, ?)
+                INSERT OR IGNORE INTO users (user_id, model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice, avatar_model, business_model, stt_model)
+                VALUES (?, ?, 1, 0, '', '', ?, ?, NULL, NULL, NULL)
                 """,
                 (user_id, self._default_model, self._default_tts_model, self._default_tts_voice),
             )
@@ -334,14 +362,14 @@ class UserStorage:
         target_chat_id = chat_id if chat_id is not None else user_id
 
         cursor = await db.execute(
-            "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+            "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice, avatar_model, business_model, stt_model FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
         if row is None:
             await self._ensure_user(db, user_id)
             cursor = await db.execute(
-                "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+                "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice, avatar_model, business_model, stt_model FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cursor.fetchone()
@@ -353,6 +381,9 @@ class UserStorage:
         quick_prompt = row["quick_prompt"] or ""
         tts_model = row["tts_model"] or self._default_tts_model
         tts_voice = row["tts_voice"] or self._default_tts_voice
+        avatar_model = row["avatar_model"] or None
+        business_model = row["business_model"] or None
+        stt_model = row["stt_model"] or None
 
         cursor = await db.execute(
             """
@@ -376,6 +407,9 @@ class UserStorage:
             quick_prompt=quick_prompt,
             tts_model=tts_model,
             tts_voice=tts_voice,
+            avatar_model=avatar_model,
+            business_model=business_model,
+            stt_model=stt_model,
             history=history,
         )
 
@@ -383,14 +417,14 @@ class UserStorage:
         """Получает только настройки пользователя без выборки истории сообщений."""
         db = await self._ensure_db()
         cursor = await db.execute(
-            "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+            "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice, avatar_model, business_model, stt_model FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
         if row is None:
             await self._ensure_user(db, user_id)
             cursor = await db.execute(
-                "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice FROM users WHERE user_id = ?",
+                "SELECT model, rich_mode, voice_mode, system_prompt, quick_prompt, tts_model, tts_voice, avatar_model, business_model, stt_model FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cursor.fetchone()
@@ -403,6 +437,9 @@ class UserStorage:
             quick_prompt=row["quick_prompt"] or "",
             tts_model=row["tts_model"] or self._default_tts_model,
             tts_voice=row["tts_voice"] or self._default_tts_voice,
+            avatar_model=row["avatar_model"] or None,
+            business_model=row["business_model"] or None,
+            stt_model=row["stt_model"] or None,
             history=[],
         )
 
@@ -436,6 +473,131 @@ class UserStorage:
             await db.execute(
                 "UPDATE users SET tts_voice = ? WHERE user_id = ?",
                 (voice, user_id),
+            )
+            await db.commit()
+
+    async def set_user_mode_model(self, user_id: int, mode_name: str, model_id: str) -> None:
+        """Устанавливает модель для конкретного режима (stand, avatar, business, stt, tts)."""
+        mode_cols = {
+            "stand": "model",
+            "avatar": "avatar_model",
+            "business": "business_model",
+            "stt": "stt_model",
+            "tts": "tts_model",
+        }
+        col = mode_cols.get(mode_name.lower())
+        if not col:
+            raise ValueError(f"Unknown mode: {mode_name}. Expected one of: {list(mode_cols.keys())}")
+
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await self._ensure_user(db, user_id)
+            await db.execute(f"UPDATE users SET {col} = ? WHERE user_id = ?", (model_id, user_id))
+            await db.commit()
+
+    async def upsert_discovered_models(self, models: list[dict]) -> None:
+        """Сохраняет или обновляет список обнаруженных моделей."""
+        if not models:
+            return
+        async with self._write_lock:
+            db = await self._ensure_db()
+            for m in models:
+                await db.execute(
+                    """
+                    INSERT INTO discovered_models (
+                        model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(model_id) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        category = excluded.category,
+                        input_modalities = excluded.input_modalities,
+                        output_modalities = excluded.output_modalities,
+                        sort_order = excluded.sort_order,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        m["model_id"],
+                        m.get("display_name", m["model_id"]),
+                        m.get("category", "text"),
+                        m.get("input_modalities", "text"),
+                        m.get("output_modalities", "text"),
+                        m.get("is_enabled", 1),
+                        m.get("sort_order", 100),
+                    ),
+                )
+            await db.commit()
+
+    async def get_available_models(
+        self, category: Optional[str] = None, enabled_only: bool = True
+    ) -> list[dict]:
+        """Возвращает список доступных моделей с фильтрацией по категории и флагу активности."""
+        db = await self._ensure_db()
+        if category:
+            if enabled_only:
+                cursor = await db.execute(
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models WHERE category = ? AND is_enabled = 1 ORDER BY sort_order ASC, model_id ASC",
+                    (category,),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models WHERE category = ? ORDER BY sort_order ASC, model_id ASC",
+                    (category,),
+                )
+        else:
+            if enabled_only:
+                cursor = await db.execute(
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models WHERE is_enabled = 1 ORDER BY sort_order ASC, model_id ASC",
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models ORDER BY sort_order ASC, model_id ASC",
+                )
+        rows = await cursor.fetchall()
+        if rows:
+            return [dict(r) for r in rows]
+
+        # Fallback по умолчанию из config если в таблице нет записей
+        fallback: list[dict] = []
+        if category == "text" or category is None:
+            for idx, mid in enumerate(settings.available_models):
+                fallback.append(
+                    {
+                        "model_id": mid,
+                        "display_name": mid,
+                        "category": "text",
+                        "input_modalities": "text,image,audio,pdf",
+                        "output_modalities": "text",
+                        "is_enabled": 1,
+                        "sort_order": idx * 10,
+                    }
+                )
+        if category == "tts" or (category is None and not fallback):
+            for idx, mid in enumerate(settings.available_tts_models):
+                fallback.append(
+                    {
+                        "model_id": mid,
+                        "display_name": mid,
+                        "category": "tts",
+                        "input_modalities": "text",
+                        "output_modalities": "audio",
+                        "is_enabled": 1,
+                        "sort_order": idx * 10,
+                    }
+                )
+        return fallback
+
+    async def get_available_model_ids(self, category: str = "text") -> list[str]:
+        """Возвращает только идентификаторы активных моделей категории."""
+        models = await self.get_available_models(category=category, enabled_only=True)
+        return [m["model_id"] for m in models]
+
+    async def toggle_discovered_model(self, model_id: str, is_enabled: bool) -> None:
+        """Включает или выключает модель в каталоге."""
+        async with self._write_lock:
+            db = await self._ensure_db()
+            await db.execute(
+                "UPDATE discovered_models SET is_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE model_id = ?",
+                (1 if is_enabled else 0, model_id),
             )
             await db.commit()
 

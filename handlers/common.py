@@ -372,7 +372,7 @@ def _render_info_text() -> str:
         "• В любом чате наберите <code>@bot_username текст</code> для выбора карточек: <b>🥊 Stand</b>, <b>🎭 Avatar</b> или <b>🎧 TTS</b>.\n\n"
         "🛠 <b>Полезные команды:</b>\n"
         "• <code>/menu</code> — главное интерактивное меню всех настроек\n"
-        "• <code>/model</code> — выбор нейросети (Gemini 3.5 Flash Lite, 3.8 Flash, 4 Argon и др.)\n"
+        "• <code>/model</code> — выбор нейросети (Gemini 3.5 Flash Lite, 3.8 Flash, 3.8 Flash Lite, 4 Argon и др.)\n"
         "• <code>/limits</code> — остаток лимитов запросов и токенов\n"
         "• <code>/clear</code> — очистка истории диалога"
     )

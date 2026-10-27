@@ -22,7 +22,7 @@ class Settings:
     available_models: list[str] = field(
         default_factory=lambda: _get_list(
             "AVAILABLE_MODELS",
-            "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.6-flash,gemini-4-argon",
+            "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.8-flash-lite,gemini-3.6-flash,gemini-4-argon",
         )
     )
     default_model: str = os.getenv("DEFAULT_MODEL", "gemini-3.5-flash-lite")

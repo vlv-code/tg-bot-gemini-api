@@ -56,6 +56,7 @@
 - **Поддержка актуального семейства Gemini:**
   - `gemini-3.5-flash-lite` (быстрая и экономичная GA-модель по умолчанию)
   - `gemini-3.8-flash` (сбалансированная reasoning-модель нового поколения)
+  - `gemini-3.8-flash-lite` (сверхбыстрая легковесная модель поколения 3.8)
   - `gemini-3.6-flash` (стабильная рабочая модель высокой пропускной способности)
   - `gemini-4-argon` (флагманская высокоинтеллектуальная модель)
 - **Выбор модели в 1 клик** через меню `/model` или главное меню `/menu`.
@@ -133,7 +134,7 @@
 | :--- | :--- | :--- |
 | `TELEGRAM_BOT_TOKEN` | *(обязательно)* | Токен бота из @BotFather |
 | `GEMINI_API_KEY` | *(обязательно)* | Ключ Gemini API из Google AI Studio |
-| `AVAILABLE_MODELS` | `gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.6-flash,gemini-4-argon` | Список доступных текстовых моделей |
+| `AVAILABLE_MODELS` | `gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.8-flash-lite,gemini-3.6-flash,gemini-4-argon` | Список доступных текстовых моделей |
 | `DEFAULT_MODEL` | `gemini-3.5-flash-lite` | Основная модель по умолчанию |
 | `MAX_HISTORY_MESSAGES` | `20` | Количество последних сообщений в контексте |
 | `RATE_LIMIT_PER_MINUTE` | `15` | Лимит запросов в минуту на пользователя |

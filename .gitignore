@@ -51,5 +51,7 @@ Thumbs.db
 # Logs & temp
 *.log
 
-# Workflows (requires workflow PAT scope)
-.github/
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/

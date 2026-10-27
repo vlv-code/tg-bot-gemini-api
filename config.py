@@ -51,7 +51,7 @@ class Settings:
     # Путь к файлу SQLite базы данных
     db_path: str = os.getenv("DB_PATH", "data/bot.db")
 
-    # Модель для TTS генерации речи (gemini-2.5-flash-preview-tts)
+    # Модель для TTS генерации речи (gemini-3.8-flash-tts)
     tts_model: str = os.getenv("TTS_MODEL", "gemini-3.8-flash-tts")
     available_tts_models: list[str] = field(
         default_factory=lambda: _get_list(

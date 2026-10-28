@@ -419,7 +419,7 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult) -> None:
     if not chosen.inline_message_id:
         return
 
-    if chosen.query.strip().lower().startswith(("/tts", "tts")):
+    if _extract_tts_inline_text(chosen.query) is not None:
         return
 
     session_id = chosen.result_id

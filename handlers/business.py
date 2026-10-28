@@ -157,6 +157,8 @@ async def _generate_secretary_reply(
     историю переписки.
 
     Возвращает (response, state); response is None при ошибке/исчерпанном лимите."""
+    priority = await _get_user_priority(owner_user_id)
+
     async with user_locks.get(owner_user_id):
         limit_status = await limiter.check(owner_user_id)
         if not limit_status.allowed:
@@ -166,68 +168,66 @@ async def _generate_secretary_reply(
             )
             return None, None
 
-    priority = await _get_user_priority(owner_user_id)
-
-    async with user_locks.get((owner_user_id, chat_id)):
-        async with global_queue.acquire(owner_user_id, priority=priority):
-            state = await storage.get(owner_user_id, chat_id=chat_id, mode="business")
-            facts = await storage.get_business_facts(owner_user_id)
-            effective_prompt = _build_secretary_prompt(
-                state.system_prompt or settings.system_prompt,
-                facts=facts,
-                hints=hint_texts,
-                persona_style=persona_prompt,
-            )
-
-            if revision_instruction:
-                message_input = (
-                    f"Previous draft reply:\n{current_draft_text}\n\n"
-                    f"Owner's correction instruction:\n\"{revision_instruction}\"\n\n"
-                    f"Client's incoming message:\n{incoming_text}\n\n"
-                    f"Rewrite and improve the draft reply strictly following the owner's instruction."
+        async with user_locks.get((owner_user_id, chat_id)):
+            async with global_queue.acquire(owner_user_id, priority=priority):
+                state = await storage.get(owner_user_id, chat_id=chat_id, mode="business")
+                facts = await storage.get_business_facts(owner_user_id)
+                effective_prompt = _build_secretary_prompt(
+                    state.system_prompt or settings.system_prompt,
+                    facts=facts,
+                    hints=hint_texts,
+                    persona_style=persona_prompt,
                 )
-            elif jitter:
-                message_input = (
-                    f"{incoming_text}\n\n"
-                    "[SYSTEM NOTE: the owner asked for another, genuinely different variation "
-                    "of the reply — do not just lightly reword the previous attempt, change the "
-                    "approach/phrasing meaningfully.]"
-                )
-            else:
-                message_input = incoming_text or "Voice/Media message from client"
 
-            if media_parts:
-                message_payload = [types.Part.from_text(text=message_input), *media_parts]
-            else:
-                message_payload = message_input
+                if revision_instruction:
+                    message_input = (
+                        f"Previous draft reply:\n{current_draft_text}\n\n"
+                        f"Owner's correction instruction:\n\"{revision_instruction}\"\n\n"
+                        f"Client's incoming message:\n{incoming_text}\n\n"
+                        f"Rewrite and improve the draft reply strictly following the owner's instruction."
+                    )
+                elif jitter:
+                    message_input = (
+                        f"{incoming_text}\n\n"
+                        "[SYSTEM NOTE: the owner asked for another, genuinely different variation "
+                        "of the reply — do not just lightly reword the previous attempt, change the "
+                        "approach/phrasing meaningfully.]"
+                    )
+                else:
+                    message_input = incoming_text or "Voice/Media message from client"
 
-            business_model = state.business_model or state.model
-            try:
-                response = await gemini_client.ask(
-                    model=business_model,
-                    history_turns=state.history,
-                    message=message_payload,
-                    system_prompt=effective_prompt,
-                    want_audio=False,
-                )
-            except GeminiError as exc:
-                logger.warning("Secretary Mode: ошибка Gemini для владельца %s: %s", owner_user_id, exc)
-                return None, state
-            except Exception:
-                logger.exception("Secretary Mode: непредвиденная ошибка при обращении к Gemini API")
-                return None, state
+                if media_parts:
+                    message_payload = [types.Part.from_text(text=message_input), *media_parts]
+                else:
+                    message_payload = message_input
 
-            await limiter.hit(owner_user_id)
-            if response.total_tokens > 0:
-                await storage.record_token_usage(
-                    user_id=owner_user_id,
-                    chat_id=chat_id,
-                    model=business_model,
-                    prompt_tokens=response.prompt_tokens,
-                    candidates_tokens=response.candidates_tokens,
-                    total_tokens=response.total_tokens,
-                )
-            return response, state
+                business_model = state.business_model or state.model
+                try:
+                    response = await gemini_client.ask(
+                        model=business_model,
+                        history_turns=state.history,
+                        message=message_payload,
+                        system_prompt=effective_prompt,
+                        want_audio=False,
+                    )
+                except GeminiError as exc:
+                    logger.warning("Secretary Mode: ошибка Gemini для владельца %s: %s", owner_user_id, exc)
+                    return None, state
+                except Exception:
+                    logger.exception("Secretary Mode: непредвиденная ошибка при обращении к Gemini API")
+                    return None, state
+
+                await limiter.hit(owner_user_id)
+                if response.total_tokens > 0:
+                    await storage.record_token_usage(
+                        user_id=owner_user_id,
+                        chat_id=chat_id,
+                        model=business_model,
+                        prompt_tokens=response.prompt_tokens,
+                        candidates_tokens=response.candidates_tokens,
+                        total_tokens=response.total_tokens,
+                    )
+                return response, state
 
 
 def _render_draft_preview(draft: "PendingDraft") -> str:
@@ -537,6 +537,9 @@ async def on_draft_reply(message: Message, bot: Bot) -> None:
     - если обычный текст -> докрутка черновика через Gemini
     """
     if message.chat.type != "private":
+        return
+
+    if message.text and message.text.startswith("/"):
         return
 
     replied = message.reply_to_message

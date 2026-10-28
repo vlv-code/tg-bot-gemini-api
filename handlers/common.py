@@ -45,7 +45,15 @@ def _run_background_task(coro) -> asyncio.Task:
     """Запускает фоновую задачу с защитой от сборщика мусора CPython."""
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+
+    def _done_callback(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logger.exception("Фоновая inline-задача завершилась с ошибкой: %s", exc, exc_info=exc)
+
+    task.add_done_callback(_done_callback)
     return task
 
 
@@ -793,7 +801,7 @@ async def _execute_inline_generation(
                 pass
             return
 
-        state = await storage.get(user_id)
+        state = await storage.get_settings(user_id)
         priority = await _get_user_priority(user_id)
 
         if session and not session.forwarded_context:
@@ -808,6 +816,7 @@ async def _execute_inline_generation(
 
         content_input: Union[str, Sequence[Union[str, types.Part]]] = raw_query
         fwd_ctx = session.forwarded_context if session else None
+        url_match = URL_REGEX.search(raw_query)
 
         if fwd_ctx:
             if is_quick:
@@ -919,7 +928,7 @@ async def _execute_inline_generation(
             await storage.record_token_usage(
                 user_id=user_id,
                 chat_id=user_id,
-                model=state.model,
+                model=target_model,
                 prompt_tokens=response.prompt_tokens,
                 candidates_tokens=response.candidates_tokens,
                 total_tokens=response.total_tokens,

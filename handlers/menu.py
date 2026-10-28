@@ -297,12 +297,12 @@ async def cb_menu_main(callback: CallbackQuery) -> None:
         pass
 
 
-@router.callback_query(F.data == "menu:business")
+@router.callback_query(F.data.in_({"menu:business", "bizmenu:main"}))
 async def cb_menu_business(callback: CallbackQuery) -> None:
-    from handlers.business import cb_business_menu
+    from handlers.business import render_business_main_screen
 
-    callback.data = "bizmenu:main"
-    await cb_business_menu(callback)
+    await render_business_main_screen(callback)
+
 
 
 @router.callback_query(F.data == "menu:model")

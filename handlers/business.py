@@ -848,23 +848,40 @@ async def cmd_business_status(message: Message) -> None:
     )
 
 
+async def render_business_main_screen(callback: CallbackQuery) -> None:
+    """Рендерит главный экран бизнес-меню (Secretary Mode) без мутации callback.data."""
+    owner_user_id = callback.from_user.id
+    facts = await storage.get_business_facts(owner_user_id)
+    rules = await storage.get_business_keyword_rules(owner_user_id)
+    connections = await storage.get_business_connections_for_owner(owner_user_id)
+    autoreply_chats: list[dict] = []
+    for c in connections:
+        autoreply_chats.extend(await storage.get_auto_reply_chats(c["business_connection_id"]))
+    text = _render_business_menu_text()
+    markup = business_menu_keyboard(len(facts), len(rules), len(autoreply_chats))
+    try:
+        if callback.message:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    except TelegramBadRequest:
+        pass
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
 @router.callback_query(F.data.startswith("bizmenu:"))
 async def cb_business_menu(callback: CallbackQuery) -> None:
     """Навигация по разделам бизнес-меню (аналог главного /menu, но для Secretary Mode)."""
     owner_user_id = callback.from_user.id
-    section = (callback.data or "").split(":", 1)[1]
+    raw_data = callback.data or ""
+    section = raw_data.split(":", 1)[1] if ":" in raw_data else "main"
 
-    if section == "main":
-        facts = await storage.get_business_facts(owner_user_id)
-        rules = await storage.get_business_keyword_rules(owner_user_id)
-        connections = await storage.get_business_connections_for_owner(owner_user_id)
-        autoreply_chats: list[dict] = []
-        for c in connections:
-            autoreply_chats.extend(await storage.get_auto_reply_chats(c["business_connection_id"]))
-        text, markup = _render_business_menu_text(), business_menu_keyboard(
-            len(facts), len(rules), len(autoreply_chats)
-        )
+    if section in ("main", "business"):
+        await render_business_main_screen(callback)
+        return
     elif section == "facts":
+
         facts = await storage.get_business_facts(owner_user_id)
         text, markup = _render_business_facts_text(facts), business_facts_keyboard(facts)
     elif section == "keywords":

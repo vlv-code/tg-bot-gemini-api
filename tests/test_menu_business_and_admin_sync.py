@@ -9,6 +9,7 @@ os.environ.setdefault("GEMINI_API_KEY", "FAKE_KEY_FOR_TESTS")
 
 from keyboards import main_menu_keyboard, admin_panel_keyboard, business_menu_keyboard
 from storage import UserStorage
+from aiogram.types import CallbackQuery, Chat, Message, User
 
 
 class TestMenuBusinessAndAdminSync(unittest.IsolatedAsyncioTestCase):
@@ -67,3 +68,71 @@ class TestMenuBusinessAndAdminSync(unittest.IsolatedAsyncioTestCase):
         args = mock_cb.message.answer.call_args[0][0]
         self.assertIn("5", args)
         self.assertIn("Каталог моделей", args)
+
+    @patch.object(Message, "edit_text", new_callable=AsyncMock)
+    @patch("handlers.business.storage")
+    async def test_menu_business_callback_with_real_frozen_callback_query(self, mock_storage, mock_edit_text):
+        from datetime import datetime
+        from aiogram.types import CallbackQuery, Chat, Message, User
+        from handlers.menu import cb_menu_business
+
+        mock_storage.get_business_facts = AsyncMock(return_value=[])
+        mock_storage.get_business_keyword_rules = AsyncMock(return_value=[])
+        mock_storage.get_business_connections_for_owner = AsyncMock(return_value=[])
+        mock_storage.get_auto_reply_chats = AsyncMock(return_value=[])
+
+        user = User(id=999, is_bot=False, first_name="RealOwner")
+        chat = Chat(id=999, type="private")
+        message = Message(
+            message_id=100,
+            date=datetime.now(),
+            chat=chat,
+            text="Menu message",
+        )
+
+        real_cb = CallbackQuery(
+            id="real_cb_id_1",
+            from_user=user,
+            chat_instance="chat_inst_1",
+            data="menu:business",
+            message=message,
+        )
+
+        # Before fix, this raises ValidationError because CallbackQuery is frozen and cb_menu_business sets callback.data = "bizmenu:main"
+        await cb_menu_business(real_cb)
+        mock_edit_text.assert_called_once()
+
+    @patch.object(Message, "edit_text", new_callable=AsyncMock)
+    @patch("handlers.business.storage")
+    async def test_bizmenu_main_callback_with_real_frozen_callback_query(self, mock_storage, mock_edit_text):
+        from datetime import datetime
+        from handlers.business import cb_business_menu
+
+        mock_storage.get_business_facts = AsyncMock(return_value=[])
+        mock_storage.get_business_keyword_rules = AsyncMock(return_value=[])
+        mock_storage.get_business_connections_for_owner = AsyncMock(return_value=[])
+        mock_storage.get_auto_reply_chats = AsyncMock(return_value=[])
+
+        user = User(id=999, is_bot=False, first_name="RealOwner")
+        chat = Chat(id=999, type="private")
+        message = Message(
+            message_id=101,
+            date=datetime.now(),
+            chat=chat,
+            text="Menu message",
+        )
+
+        real_cb = CallbackQuery(
+            id="real_cb_id_2",
+            from_user=user,
+            chat_instance="chat_inst_2",
+            data="bizmenu:main",
+            message=message,
+        )
+
+        await cb_business_menu(real_cb)
+        mock_edit_text.assert_called_once()
+
+
+
+

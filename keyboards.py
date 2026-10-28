@@ -1,9 +1,26 @@
+import hashlib
 from typing import Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import settings
 from storage import UserState
+
+MODE_TO_CODE = {
+    "stand": "s",
+    "avatar": "a",
+    "business": "b",
+    "stt": "v",
+    "tts": "t",
+}
+
+CODE_TO_MODE = {
+    "s": "stand",
+    "a": "avatar",
+    "b": "business",
+    "v": "stt",
+    "t": "tts",
+}
 
 
 def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -59,16 +76,52 @@ def models_hub_keyboard(state: UserState) -> InlineKeyboardMarkup:
 
 
 def mode_model_selector_keyboard(
-    mode: str, current_model: str, available_models: list[dict]
+    mode: str,
+    current_model: str,
+    available_models: list[dict],
+    page: int = 1,
+    page_size: int = 6,
 ) -> InlineKeyboardMarkup:
-    """Клавиатура выбора модели для конкретного режима."""
+    """Клавиатура выбора модели для конкретного режима с защитой от лимита callback_data (64 байта) и пагинацией."""
+    mode_code = MODE_TO_CODE.get(mode, mode)
+    total = len(available_models)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    page_models = available_models[start_idx:end_idx]
+
     buttons = []
-    for m in available_models:
+    for m in page_models:
         mid = m["model_id"]
         disp = m.get("display_name", mid)
         is_current = (mid == current_model)
         label = f"✅ {disp}" if is_current else disp
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"set_mode_model:{mode}:{mid}")])
+
+        cb = f"smm:{mode_code}:{mid}:p{page}"
+        # Telegram Bot API строго ограничивает callback_data 64 байтами (UTF-8)
+        if len(cb.encode("utf-8")) > 64:
+            prefix = f"smm:{mode_code}:"
+            suffix = f":p{page}"
+            max_mid_bytes = 64 - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
+            h = hashlib.md5(mid.encode("utf-8")).hexdigest()[:6]
+            cut_len = max_mid_bytes - 7
+            mid_trimmed = mid[:cut_len] + "_" + h
+            cb = f"{prefix}{mid_trimmed}{suffix}"
+
+        buttons.append([InlineKeyboardButton(text=label, callback_data=cb)])
+
+    # Строка навигации пагинации (если моделей больше одной страницы)
+    if total_pages > 1:
+        prev_page = page - 1 if page > 1 else total_pages
+        next_page = page + 1 if page < total_pages else 1
+        nav_row = [
+            InlineKeyboardButton(text="◀️ Пред.", callback_data=f"smm_page:{mode_code}:{prev_page}"),
+            InlineKeyboardButton(text=f"Стр. {page}/{total_pages}", callback_data=f"smm_noop:{mode_code}:{page}"),
+            InlineKeyboardButton(text="След. ▶️", callback_data=f"smm_page:{mode_code}:{next_page}"),
+        ]
+        buttons.append(nav_row)
 
     buttons.append([InlineKeyboardButton(text="◀️ Назад к режимам", callback_data="menu:model")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)

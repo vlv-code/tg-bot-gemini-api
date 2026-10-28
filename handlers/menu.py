@@ -15,6 +15,7 @@ from audio import convert_gemini_audio
 from config import settings
 from gemini_client import GeminiError
 from keyboards import (
+    CODE_TO_MODE,
     clear_history_chats_keyboard,
     info_menu_keyboard,
     limits_keyboard,
@@ -315,14 +316,67 @@ async def cb_menu_model(callback: CallbackQuery) -> None:
             parse_mode="HTML",
             reply_markup=models_hub_keyboard(state),
         )
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.error("Failed to render models hub: %s", exc)
+            await callback.answer("Ошибка при открытии хаба моделей", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("pick_mode_model:"))
 async def cb_pick_mode_model(callback: CallbackQuery) -> None:
     await callback.answer()
     mode = callback.data.split(":", 1)[1]
+    state = await storage.get_settings(callback.from_user.id)
+    category = "tts" if mode == "tts" else "text"
+    available = await storage.get_available_models(category=category, enabled_only=True)
+
+    mode_current = {
+        "stand": state.stand_model,
+        "avatar": state.avatar_model or state.model,
+        "business": state.business_model or state.model,
+        "stt": state.stt_model or state.model,
+        "tts": state.tts_model,
+    }.get(mode, state.model)
+
+    # Определяем начальную страницу пагинации (чтобы активная модель сразу была видна)
+    idx = next((i for i, m in enumerate(available) if m["model_id"] == mode_current), 0)
+    init_page = (idx // 6) + 1
+
+    mode_title = MODE_NAMES.get(mode, mode)
+    text = (
+        f"⚙️ <b>Выбор модели для режима {mode_title}:</b>\n\n"
+        f"Текущая активная модель: <code>{html.escape(mode_current)}</code>\n\n"
+        "<i>Выберите модель из списка актуальных:</i>"
+    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=mode_model_selector_keyboard(mode, mode_current, available, page=init_page),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.error("Failed to open mode model selector (%s): %s", mode, exc)
+            await callback.answer("Ошибка при открытии списка моделей", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("smm_noop:"))
+async def cb_smm_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("smm_page:"))
+async def cb_page_mode_model(callback: CallbackQuery) -> None:
+    await callback.answer()
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        return
+    _, mode_code, page_str = parts
+    try:
+        target_page = int(page_str)
+    except ValueError:
+        target_page = 1
+    mode = CODE_TO_MODE.get(mode_code, mode_code)
     state = await storage.get_settings(callback.from_user.id)
     category = "tts" if mode == "tts" else "text"
     available = await storage.get_available_models(category=category, enabled_only=True)
@@ -345,32 +399,59 @@ async def cb_pick_mode_model(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             text,
             parse_mode="HTML",
-            reply_markup=mode_model_selector_keyboard(mode, mode_current, available),
+            reply_markup=mode_model_selector_keyboard(mode, mode_current, available, page=target_page),
         )
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.error("Failed to page mode model selector (%s): %s", mode, exc)
+            await callback.answer("Ошибка при переключении страницы", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("set_mode_model:"))
+@router.callback_query(F.data.startswith(("set_mode_model:", "smm:")))
 async def cb_set_mode_model(callback: CallbackQuery) -> None:
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Некорректный запрос", show_alert=True)
-        return
-    _, mode, model_id = parts
+    parts = callback.data.split(":")
+    page = 1
+    if callback.data.startswith("smm:"):
+        # Формат: smm:{mode_code}:{model_id} или smm:{mode_code}:{model_id}:p{page}
+        if len(parts) < 3:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        mode_code = parts[1]
+        model_id_raw = parts[2]
+        if len(parts) > 3 and parts[3].startswith("p"):
+            try:
+                page = int(parts[3][1:])
+            except ValueError:
+                page = 1
+        mode = CODE_TO_MODE.get(mode_code, mode_code)
+    else:
+        # Legacy формат: set_mode_model:{mode}:{model_id}
+        if len(parts) != 3:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        mode = parts[1]
+        model_id_raw = parts[2]
+
     user_id = callback.from_user.id
     category = "tts" if mode == "tts" else "text"
     available = await storage.get_available_models(category=category, enabled_only=True)
     available_ids = [m["model_id"] for m in available]
 
-    # Валидация модели
+    # Сопоставляем ID модели (в том числе укороченный по хешу)
+    model_id = model_id_raw
     if (
         model_id not in available_ids
         and model_id not in settings.available_models
         and model_id not in settings.available_tts_models
     ):
-        await callback.answer("Модель недоступна или отключена", show_alert=True)
-        return
+        # Пробуем найти совпадение по префиксу до _hash
+        prefix_candidate = model_id_raw.rsplit("_", 1)[0]
+        matched = next((m_id for m_id in available_ids if m_id.startswith(prefix_candidate)), None)
+        if matched:
+            model_id = matched
+        else:
+            await callback.answer("Модель недоступна или отключена", show_alert=True)
+            return
 
     await storage.set_user_mode_model(user_id, mode, model_id)
     if mode == "stand":
@@ -390,10 +471,12 @@ async def cb_set_mode_model(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             text,
             parse_mode="HTML",
-            reply_markup=mode_model_selector_keyboard(mode, model_id, available),
+            reply_markup=mode_model_selector_keyboard(mode, model_id, available, page=page),
         )
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.error("Failed to update mode model selector (%s): %s", mode, exc)
+            await callback.answer("Ошибка при обновлении списка моделей", show_alert=True)
 
 
 @router.callback_query(F.data.startswith(("set_model:", "model:")))
@@ -410,8 +493,9 @@ async def cb_set_model(callback: CallbackQuery) -> None:
             parse_mode="HTML",
             reply_markup=models_hub_keyboard(state),
         )
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.error("Failed to update models hub: %s", exc)
     await callback.answer(f"Модель переключена на {model} (контекст чата очищен)")
 
 
@@ -425,8 +509,10 @@ async def cb_menu_tts(callback: CallbackQuery) -> None:
             parse_mode="HTML",
             reply_markup=tts_menu_keyboard(state.tts_model, state.tts_voice, state.voice_mode),
         )
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.error("Failed to render TTS menu: %s", exc)
+            await callback.answer("Ошибка при открытии меню TTS", show_alert=True)
 
 
 @router.callback_query(F.data == "menu:tts_models")

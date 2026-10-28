@@ -113,7 +113,7 @@ async def cmd_info(message: Message) -> None:
     )
 
 
-@router.message(Command("model"))
+@router.message(Command("model", "models"))
 async def cmd_model(message: Message) -> None:
     state = await storage.get_settings(message.from_user.id)
     await message.answer(
@@ -282,6 +282,7 @@ async def cb_speak_response(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:main")
 async def cb_menu_main(callback: CallbackQuery) -> None:
+    await callback.answer()
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
@@ -294,7 +295,6 @@ async def cb_menu_main(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:business")
@@ -307,6 +307,7 @@ async def cb_menu_business(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:model")
 async def cb_menu_model(callback: CallbackQuery) -> None:
+    await callback.answer()
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -316,11 +317,11 @@ async def cb_menu_model(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("pick_mode_model:"))
 async def cb_pick_mode_model(callback: CallbackQuery) -> None:
+    await callback.answer()
     mode = callback.data.split(":", 1)[1]
     state = await storage.get_settings(callback.from_user.id)
     category = "tts" if mode == "tts" else "text"
@@ -348,7 +349,6 @@ async def cb_pick_mode_model(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("set_mode_model:"))
@@ -378,6 +378,9 @@ async def cb_set_mode_model(callback: CallbackQuery) -> None:
         await storage.clear_history(user_id, chat_id=chat_id)
 
     mode_title = MODE_NAMES.get(mode, mode)
+    clear_msg = " (история чата очищена)" if mode == "stand" else ""
+    await callback.answer(f"Модель для {mode_title} переключена на {model_id}{clear_msg}")
+
     text = (
         f"⚙️ <b>Выбор модели для режима {mode_title}:</b>\n\n"
         f"Текущая активная модель: <code>{html.escape(model_id)}</code>\n\n"
@@ -391,8 +394,6 @@ async def cb_set_mode_model(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    clear_msg = " (история чата очищена)" if mode == "stand" else ""
-    await callback.answer(f"Модель для {mode_title} переключена на {model_id}{clear_msg}")
 
 
 @router.callback_query(F.data.startswith(("set_model:", "model:")))
@@ -416,6 +417,7 @@ async def cb_set_model(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:tts")
 async def cb_menu_tts(callback: CallbackQuery) -> None:
+    await callback.answer()
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -425,11 +427,11 @@ async def cb_menu_tts(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:tts_models")
 async def cb_menu_tts_models(callback: CallbackQuery) -> None:
+    await callback.answer()
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -439,7 +441,6 @@ async def cb_menu_tts_models(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("set_tts_model:"))
@@ -447,6 +448,7 @@ async def cb_set_tts_model(callback: CallbackQuery) -> None:
     model = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
     await storage.set_tts_model(user_id, model)
+    await callback.answer(f"TTS модель: {model}")
 
     try:
         await callback.message.edit_text(
@@ -456,11 +458,11 @@ async def cb_set_tts_model(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer(f"TTS модель: {model}")
 
 
 @router.callback_query(F.data == "menu:tts_voices")
 async def cb_menu_tts_voices(callback: CallbackQuery) -> None:
+    await callback.answer()
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -470,7 +472,6 @@ async def cb_menu_tts_voices(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("set_tts_voice:"))
@@ -478,6 +479,7 @@ async def cb_set_tts_voice(callback: CallbackQuery) -> None:
     voice = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
     await storage.set_tts_voice(user_id, voice)
+    await callback.answer(f"Голос озвучки: {voice}")
 
     try:
         await callback.message.edit_text(
@@ -487,7 +489,6 @@ async def cb_set_tts_voice(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer(f"Голос озвучки: {voice}")
 
 
 @router.callback_query(F.data == "toggle_voice_tts")
@@ -507,6 +508,7 @@ async def cb_toggle_voice_tts(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:settings")
 async def cb_menu_settings(callback: CallbackQuery) -> None:
+    await callback.answer()
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -516,7 +518,6 @@ async def cb_menu_settings(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data == "toggle_rich")
@@ -609,6 +610,7 @@ async def cb_clear_chat(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:info")
 async def cb_menu_info(callback: CallbackQuery) -> None:
+    await callback.answer()
     try:
         await callback.message.edit_text(
             _render_info_text(),
@@ -617,11 +619,11 @@ async def cb_menu_info(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 
 
 @router.callback_query(F.data.in_({"menu:limits", "refresh_limits"}))
 async def cb_menu_limits(callback: CallbackQuery) -> None:
+    await callback.answer()
     text = await _render_limits_menu_text(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -631,5 +633,4 @@ async def cb_menu_limits(callback: CallbackQuery) -> None:
         )
     except TelegramBadRequest:
         pass
-    await callback.answer()
 

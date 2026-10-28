@@ -20,6 +20,49 @@ MAX_BUSINESS_FACTS_PER_OWNER = 50
 MAX_BUSINESS_KEYWORD_RULES_PER_OWNER = 50
 
 
+def _format_baseline_models() -> list[dict]:
+    """Формирует список базовых моделей из конфигурации с иконками и сортировкой."""
+    baseline: list[dict] = []
+    for mid in settings.available_models:
+        mid_lower = mid.lower()
+        if "lite" in mid_lower:
+            sort_order = 10
+            icon = "⚡️"
+        elif "flash" in mid_lower:
+            sort_order = 20
+            icon = "⚖️"
+        elif "argon" in mid_lower or "pro" in mid_lower or "ultra" in mid_lower:
+            sort_order = 30
+            icon = "🧠"
+        else:
+            sort_order = 35
+            icon = "🤖"
+        baseline.append(
+            {
+                "model_id": mid,
+                "display_name": f"{icon} {mid}",
+                "category": "text",
+                "input_modalities": "text,image,audio,pdf",
+                "output_modalities": "text",
+                "is_enabled": 1,
+                "sort_order": sort_order,
+            }
+        )
+    for mid in settings.available_tts_models:
+        baseline.append(
+            {
+                "model_id": mid,
+                "display_name": f"🎧 {mid}",
+                "category": "tts",
+                "input_modalities": "text",
+                "output_modalities": "audio",
+                "is_enabled": 1,
+                "sort_order": 20,
+            }
+        )
+    return baseline
+
+
 @dataclass
 class Turn:
     role: str  # "user" или "model"
@@ -68,6 +111,7 @@ class UserStorage:
         self._db: Optional[aiosqlite.Connection] = None
         self._init_lock = asyncio.Lock()
         self._write_lock = AsyncRLock()
+        self._available_models_cache: dict[tuple, list[dict]] = {}
 
     async def init_db(self) -> None:
         """Инициализирует постоянное соединение с базой данных, WAL-режим и таблицы."""
@@ -509,6 +553,31 @@ class UserStorage:
             await db.execute(f"UPDATE users SET {col} = ? WHERE user_id = ?", (model_id, user_id))
             await db.commit()
 
+    async def seed_baseline_models(self) -> None:
+        """Засеивает базовые модели из конфигурации в discovered_models (если их там нет)."""
+        async with self._write_lock:
+            db = await self._ensure_db()
+            for m in _format_baseline_models():
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO discovered_models (
+                        model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        m["model_id"],
+                        m["display_name"],
+                        m["category"],
+                        m["input_modalities"],
+                        m["output_modalities"],
+                        m["is_enabled"],
+                        m["sort_order"],
+                    ),
+                )
+            await db.commit()
+            if hasattr(self, "_available_models_cache"):
+                self._available_models_cache.clear()
+
     async def upsert_discovered_models(self, models: list[dict]) -> None:
         """Сохраняет или обновляет список обнаруженных моделей."""
         if not models:
@@ -540,11 +609,17 @@ class UserStorage:
                     ),
                 )
             await db.commit()
+            if hasattr(self, "_available_models_cache"):
+                self._available_models_cache.clear()
 
     async def get_available_models(
         self, category: Optional[str] = None, enabled_only: bool = True
     ) -> list[dict]:
         """Возвращает список доступных моделей с фильтрацией по категории и флагу активности."""
+        cache_key = (category, enabled_only)
+        if hasattr(self, "_available_models_cache") and cache_key in self._available_models_cache:
+            return [dict(m) for m in self._available_models_cache[cache_key]]
+
         db = await self._ensure_db()
         if category:
             if enabled_only:
@@ -568,36 +643,19 @@ class UserStorage:
                 )
         rows = await cursor.fetchall()
         if rows:
-            return [dict(r) for r in rows]
+            models = [dict(r) for r in rows]
+            if not hasattr(self, "_available_models_cache"):
+                self._available_models_cache = {}
+            self._available_models_cache[cache_key] = [dict(m) for m in models]
+            return models
 
         # Fallback по умолчанию из config если в таблице нет записей
-        fallback: list[dict] = []
-        if category == "text" or category is None:
-            for idx, mid in enumerate(settings.available_models):
-                fallback.append(
-                    {
-                        "model_id": mid,
-                        "display_name": mid,
-                        "category": "text",
-                        "input_modalities": "text,image,audio,pdf",
-                        "output_modalities": "text",
-                        "is_enabled": 1,
-                        "sort_order": idx * 10,
-                    }
-                )
-        if category == "tts" or (category is None and not fallback):
-            for idx, mid in enumerate(settings.available_tts_models):
-                fallback.append(
-                    {
-                        "model_id": mid,
-                        "display_name": mid,
-                        "category": "tts",
-                        "input_modalities": "text",
-                        "output_modalities": "audio",
-                        "is_enabled": 1,
-                        "sort_order": idx * 10,
-                    }
-                )
+        baseline = _format_baseline_models()
+        fallback = [
+            dict(bm) for bm in baseline
+            if (category is None or bm["category"] == category)
+            and (not enabled_only or bm.get("is_enabled", 1))
+        ]
         return fallback
 
     async def get_available_model_ids(self, category: str = "text") -> list[str]:
@@ -614,6 +672,8 @@ class UserStorage:
                 (1 if is_enabled else 0, model_id),
             )
             await db.commit()
+            if hasattr(self, "_available_models_cache"):
+                self._available_models_cache.clear()
 
     async def toggle_rich(self, user_id: int) -> bool:
 

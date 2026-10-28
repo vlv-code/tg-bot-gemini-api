@@ -60,6 +60,7 @@ async def main() -> None:
     try:
         # Инициализируем базу данных SQLite
         await storage.init_db()
+        await storage.seed_baseline_models()
 
         # Фоновая синхронизация моделей с Google GenAI API
         sync_task = asyncio.create_task(start_models_sync_worker())

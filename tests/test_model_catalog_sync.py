@@ -104,8 +104,9 @@ class TestModelCatalogSync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["tts"], 1)
 
         db_models = await self.storage.get_available_models(category="text")
-        self.assertEqual(len(db_models), 1)
-        self.assertEqual(db_models[0]["model_id"], "gemini-3.8-flash")
+        model_ids = [m["model_id"] for m in db_models]
+        self.assertIn("gemini-3.8-flash", model_ids)
+        self.assertIn("gemini-3.8-flash-lite", model_ids)
 
     async def test_sync_models_catalog_handles_error(self):
         self.client._client.aio.models.list = AsyncMock(side_effect=RuntimeError("API error"))

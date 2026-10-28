@@ -429,6 +429,8 @@ async def sync_models_catalog(client: GeminiClient, storage: Any) -> dict:
         models = await client.fetch_and_classify_models()
         if models:
             await storage.upsert_discovered_models(models)
+        if hasattr(storage, "seed_baseline_models"):
+            await storage.seed_baseline_models()
         stats = {
             "total": len(models),
             "text": sum(1 for m in models if m.get("category") == "text"),

@@ -530,7 +530,16 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     await debounce_manager.push((business_connection_id, chat_id), acc_msg)
 
 
-@router.message(F.reply_to_message)
+def is_draft_card_reply(message: Message) -> bool:
+    """Проверяет, является ли сообщение ответом на активную карточку черновика Secretary Mode в ЛС."""
+    if not message.reply_to_message or message.chat.type != "private":
+        return False
+    if message.text and message.text.startswith("/"):
+        return False
+    return bool(draft_registry.get_draft_id_by_card(message.reply_to_message.message_id))
+
+
+@router.message(F.reply_to_message, is_draft_card_reply)
 async def on_draft_reply(message: Message, bot: Bot) -> None:
     """Обрабатывает реплай владельца на карточку черновика:
     - если начинается с . или ! -> моментальная прямая отправка клиенту

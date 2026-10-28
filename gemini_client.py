@@ -259,7 +259,7 @@ class GeminiClient:
                 async with asyncio.timeout(self.timeout_seconds):
                     response = await self._client.aio.models.generate_content(
                         model=target_model,
-                        contents=f"Прочитай следующий текст:\n\n{text}",
+                        contents=text,
                         config=config,
                     )
                 if response.candidates and response.candidates[0].content:

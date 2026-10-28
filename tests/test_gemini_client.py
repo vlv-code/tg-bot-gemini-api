@@ -100,6 +100,30 @@ class TestGeminiClientFallbacks(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(calls, ["gemini-3.5-flash-lite"])
 
+    async def test_generate_speech_sends_exact_text_without_prompt_leakage(self):
+        """Проверяем, что в TTS передаётся чистый текст без префиксов 'Прочитай следующий текст'."""
+        mock_response = MagicMock()
+        mock_part = MagicMock()
+        mock_part.inline_data.data = b"RIFFfakeaudio"
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [mock_part]
+        mock_response.candidates = [mock_candidate]
+
+        self.client._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        audio_bytes = await self.client.generate_speech(
+            text="Привет! Чем могу помочь?",
+            voice_name="Puck",
+            model="gemini-3.8-flash-lite-tts",
+        )
+        self.assertEqual(audio_bytes, b"RIFFfakeaudio")
+
+        # Проверяем переданные аргументы в generate_content
+        call_kwargs = self.client._client.aio.models.generate_content.call_args.kwargs
+        self.assertEqual(call_kwargs["contents"], "Привет! Чем могу помочь?")
+        self.assertNotIn("Прочитай следующий текст", call_kwargs["contents"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

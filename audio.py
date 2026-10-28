@@ -31,18 +31,13 @@ async def convert_gemini_audio(
     Возвращает:
         (audio_bytes, filename, mime_type)
     """
+    wav_payload = pcm_to_wav(pcm_bytes, sample_rate=sample_rate, channels=channels)
     if shutil.which("ffmpeg"):
         try:
             # Асинхронно запускаем ffmpeg без блокировки основного потока
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-y",
-                "-f",
-                "s16le",
-                "-ar",
-                str(sample_rate),
-                "-ac",
-                str(channels),
                 "-i",
                 "pipe:0",
                 "-c:a",
@@ -58,7 +53,7 @@ async def convert_gemini_audio(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            stdout, _ = await proc.communicate(input=pcm_bytes)
+            stdout, _ = await proc.communicate(input=wav_payload)
             if proc.returncode == 0 and stdout:
                 return stdout, "voice.ogg", "audio/ogg"
             logger.warning("ffmpeg завершился с кодом %s, переключаемся на WAV", proc.returncode)
@@ -66,5 +61,4 @@ async def convert_gemini_audio(
             logger.exception("Асинхронное кодирование ffmpeg не удалось, fallback на WAV")
 
     # Fallback на валидный WAV файл
-    wav_bytes = pcm_to_wav(pcm_bytes, sample_rate=sample_rate, channels=channels)
-    return wav_bytes, "voice.wav", "audio/wav"
+    return wav_payload, "voice.wav", "audio/wav"

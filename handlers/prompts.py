@@ -1,5 +1,6 @@
 import html
 import logging
+from typing import Optional
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest

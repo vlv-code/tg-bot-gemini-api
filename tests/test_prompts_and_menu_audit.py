@@ -29,6 +29,12 @@ class TestPromptsAndMenuAudit(unittest.IsolatedAsyncioTestCase):
         )
 
     # --- 2. AUD-03: Protect against '=' in questions ---
+    def test_aud_03_type_hints_evaluable_without_name_error(self):
+        import typing
+        from handlers.prompts import _parse_prompt_preset_assignment
+        hints = typing.get_type_hints(_parse_prompt_preset_assignment)
+        self.assertIn("return", hints)
+
     def test_aud_03_parse_prompt_preset_assignment_helper(self):
         from handlers.prompts import _parse_prompt_preset_assignment
 

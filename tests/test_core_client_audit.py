@@ -93,12 +93,13 @@ class TestCoreClientAudit(unittest.IsolatedAsyncioTestCase):
         audio = await self.client.generate_speech(text="Привет мир", voice_name="Aoede")
         self.assertEqual(audio, b"PCM_DATA_BYTES")
 
-        # Verify config passed to generate_content
+        # Verify config passed to generate_content: response_mime_type must be None (Gemini API 400 rejection guard)
         calls = self.client._client.aio.models.generate_content.call_args_list
         self.assertTrue(len(calls) > 0)
         config_arg = calls[0].kwargs.get("config")
         self.assertIsNotNone(config_arg)
-        self.assertEqual(getattr(config_arg, "response_mime_type", None), "audio/L16;codec=pcm;rate=24000")
+        self.assertIsNone(getattr(config_arg, "response_mime_type", None))
+        self.assertEqual(config_arg.response_modalities, ["AUDIO"])
 
     # 3. AUD-09 (Core): used_model in GeminiResponse and ask()
     def test_aud09_gemini_response_has_used_model_field(self):

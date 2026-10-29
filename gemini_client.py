@@ -255,7 +255,6 @@ class GeminiClient:
                         )
                     )
                 ),
-                response_mime_type="audio/L16;codec=pcm;rate=24000",
             )
             try:
                 logger.info("Генерация TTS для текста (%d симв.) голосом %s через модель %s...", len(text), effective_voice, target_model)

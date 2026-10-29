@@ -10,3 +10,11 @@ venv/
 NOTES.md
 *.zip
 docker-compose.yml
+data/
+tests/
+docs/
+.pytest_cache/
+conftest.py
+*.db
+*.sqlite
+*.sqlite3

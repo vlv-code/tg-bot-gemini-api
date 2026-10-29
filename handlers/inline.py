@@ -3,7 +3,7 @@ import hashlib
 import html
 import logging
 import time
-from typing import Optional, Union
+from typing import Optional
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -46,6 +46,80 @@ router = Router()
 
 
 # --- Инлайн-режим (карточки Stand, Avatar, TTS) ---
+
+INLINE_TTS_TIMEOUT_SECONDS = 9.0
+
+
+async def _generate_and_cache_tts(
+    bot: Bot,
+    user_id: int,
+    text: str,
+    voice: str,
+    model: str,
+    priority: int,
+) -> Optional[str]:
+    """Фоновая генерация TTS речи, загрузка voice в Telegram и сохранение file_id в SQLite."""
+    try:
+        async with global_queue.acquire(user_id, priority=priority):
+            audio_bytes = await gemini_client.generate_speech(
+                text=text,
+                voice_name=voice,
+                model=model,
+            )
+            await limiter.hit(user_id)
+    except Exception as exc:
+        logger.warning("Фоновая генерация TTS не удалась: %s", exc)
+        return None
+
+    if not audio_bytes:
+        return None
+
+    try:
+        audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
+        voice_file = BufferedInputFile(audio_data, filename=audio_filename)
+
+        file_id: Optional[str] = None
+        if settings.tts_dump_chat_id:
+            try:
+                sent_msg = await bot.send_voice(
+                    chat_id=settings.tts_dump_chat_id,
+                    voice=voice_file,
+                    disable_notification=True,
+                )
+                file_id = sent_msg.voice.file_id
+                try:
+                    await bot.delete_message(chat_id=settings.tts_dump_chat_id, message_id=sent_msg.message_id)
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.warning("Не удалось загрузить voice в TTS_DUMP_CHAT_ID: %s", exc)
+
+        if not file_id:
+            try:
+                sent_msg = await bot.send_voice(
+                    chat_id=user_id,
+                    voice=voice_file,
+                    disable_notification=True,
+                )
+                file_id = sent_msg.voice.file_id
+                try:
+                    await bot.delete_message(chat_id=user_id, message_id=sent_msg.message_id)
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.info("Не удалось отправить voice в ЛС user_id=%s: %s", user_id, exc)
+                return None
+
+        await storage.save_cached_tts_voice(
+            text=text,
+            voice=voice,
+            model=model,
+            file_id=file_id,
+        )
+        return file_id
+    except Exception as exc:
+        logger.warning("Ошибка обработки/кэширования аудио: %s", exc)
+        return None
 
 def _extract_tts_inline_text(raw_query: str) -> Optional[str]:
     """Извлекает текст для озвучки при наличии префиксов ~ (даже слитно), /tts, tts, /гс, гс."""
@@ -154,96 +228,70 @@ async def handle_inline(query: InlineQuery) -> None:
         if _active_inline_tts_tasks.get(user_id) != query_token:
             return
 
-        # 4. Генерируем речь через Gemini API
+        # 4. Генерируем речь через Gemini API с таймаутом 9.0с и фоновым прогревом кэша
         async with user_locks.get(user_id):
             limit_status = await limiter.check(user_id)
             if not limit_status.allowed:
-                return
-
-            priority = await _get_user_priority(user_id)
-            try:
-                async with global_queue.acquire(user_id, priority=priority):
-                    audio_bytes = await gemini_client.generate_speech(
-                        text=tts_text,
-                        voice_name=state.tts_voice,
-                        model=state.tts_model,
-                    )
-                    await limiter.hit(user_id)
-            except Exception as exc:
-                logger.warning("Ошибка при генерации TTS в инлайн-режиме: %s", exc)
-                friendly_msg = str(exc)
-                article = InlineQueryResultArticle(
-                    id="tts_error",
-                    title="⚠️ Озвучка TTS временно недоступна",
-                    description=f"{friendly_msg[:80]}",
+                limit_article = InlineQueryResultArticle(
+                    id="tts_limit",
+                    title="⏳ Лимит запросов исчерпан",
+                    description="Попробуйте позже",
                     input_message_content=InputTextMessageContent(
-                        message_text=(
-                            f"🎙 <b>Озвучка текста (TTS):</b>\n<blockquote>{html.escape(tts_text)}</blockquote>\n\n"
-                            f"⚠️ <i>{html.escape(friendly_msg)}</i>"
-                        ),
+                        message_text="⏳ <b>Лимит запросов исчерпан.</b> Попробуйте позже.",
                         parse_mode="HTML",
                     ),
                 )
                 try:
-                    await query.answer(results=[article], cache_time=10, is_personal=True)
+                    await query.answer(results=[limit_article], cache_time=5, is_personal=True)
                 except Exception:
                     pass
                 return
 
-            audio_data, audio_filename, _ = await convert_gemini_audio(audio_bytes)
-            voice_file = BufferedInputFile(audio_data, filename=audio_filename)
+            priority = await _get_user_priority(user_id)
+            tts_task = asyncio.create_task(
+                _generate_and_cache_tts(
+                    bot=query.bot,
+                    user_id=user_id,
+                    text=tts_text,
+                    voice=state.tts_voice,
+                    model=state.tts_model,
+                    priority=priority,
+                )
+            )
 
-            # Загрузка на серверы Telegram для получения voice_file_id
-            file_id: Optional[str] = None
-            if settings.tts_dump_chat_id:
+            try:
+                file_id = await asyncio.wait_for(asyncio.shield(tts_task), timeout=INLINE_TTS_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                placeholder = InlineQueryResultArticle(
+                    id=result_id,
+                    title="⏳ Аудио готовится...",
+                    description="Синтез речи займёт ещё пару секунд — повторите запрос",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"🎙 <i>Синтез аудио для «{html.escape(tts_text[:60])}» завершается...</i>",
+                        parse_mode="HTML",
+                    ),
+                )
                 try:
-                    sent_msg = await query.bot.send_voice(
-                        chat_id=settings.tts_dump_chat_id,
-                        voice=voice_file,
-                        disable_notification=True,
-                    )
-                    file_id = sent_msg.voice.file_id
-                    try:
-                        await query.bot.delete_message(chat_id=settings.tts_dump_chat_id, message_id=sent_msg.message_id)
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    logger.warning("Не удалось загрузить voice в TTS_DUMP_CHAT_ID: %s", exc)
+                    await query.answer(results=[placeholder], cache_time=1, is_personal=True)
+                except Exception:
+                    pass
+                return
 
             if not file_id:
+                # Ошибка генерации или ЛС заблокирован
                 try:
-                    sent_msg = await query.bot.send_voice(
-                        chat_id=user_id,
-                        voice=voice_file,
-                        disable_notification=True,
+                    await query.answer(
+                        results=[],
+                        cache_time=0,
+                        is_personal=True,
+                        button=InlineQueryResultsButton(
+                            text="🎙 Нажмите Start, чтобы включить озвучку",
+                            start_parameter="init_tts",
+                        ),
                     )
-                    file_id = sent_msg.voice.file_id
-                    try:
-                        await query.bot.delete_message(chat_id=user_id, message_id=sent_msg.message_id)
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    logger.info("Не удалось отправить voice в ЛС user_id=%s: %s", user_id, exc)
-                    try:
-                        await query.answer(
-                            results=[],
-                            cache_time=0,
-                            is_personal=True,
-                            button=InlineQueryResultsButton(
-                                text="🎙 Нажмите Start, чтобы включить озвучку",
-                                start_parameter="init_tts",
-                            ),
-                        )
-                    except Exception:
-                        pass
-                    return
-
-            await storage.save_cached_tts_voice(
-                text=tts_text,
-                voice=state.tts_voice,
-                model=state.tts_model,
-                file_id=file_id,
-            )
+                except Exception:
+                    pass
+                return
 
         voice_res = InlineQueryResultCachedVoice(
             id=result_id,

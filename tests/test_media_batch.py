@@ -200,7 +200,7 @@ class TestMediaBatch(unittest.IsolatedAsyncioTestCase):
 
         payload = await build_media_batch(self.bot, [m])
         self.assertEqual(len(payload.gemini_parts), 0)
-        self.assertIn("⚠️ Медиа > 20 МБ пропущено", payload.media_badges)
+        self.assertIn("⚠️ Медиа > 15 МБ пропущено", payload.media_badges)
 
 
 class TestFormatIncomingSummary(unittest.TestCase):

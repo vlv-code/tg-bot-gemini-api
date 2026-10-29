@@ -68,6 +68,7 @@ class PendingDraft:
     chat_id: int
     owner_user_id: int
     draft_text: str
+    turn_text: str = ""
     incoming_text: str = ""
     incoming_summary: str = ""
     counterparty_name: str = "Собеседник"
@@ -222,7 +223,7 @@ async def _generate_secretary_reply(
                     await storage.record_token_usage(
                         user_id=owner_user_id,
                         chat_id=chat_id,
-                        model=business_model,
+                        model=getattr(response, "used_model", None) or business_model,
                         prompt_tokens=response.prompt_tokens,
                         candidates_tokens=response.candidates_tokens,
                         total_tokens=response.total_tokens,
@@ -359,7 +360,8 @@ async def on_business_connection(event: BusinessConnection, bot: Bot) -> None:
     else:
         status_text = (
             "✅ <b>Secretary Mode подключён.</b>\n\n"
-            "Для новых чатов по умолчанию бот присылает вам черновик ответа на подтверждение — "
+            "Шаблоны ключевых слов отправляются клиенту мгновенно (без участия Gemini); "
+            "ответы ИИ формируются как черновики на подтверждение — "
             "ничего не уходит собеседнику без вашего тапа. Авто-ответ можно включить точечно "
             "прямо из карточки черновика. Статус подключения и список авто-чатов — командой /business."
         )
@@ -413,9 +415,7 @@ async def _process_batched_business_messages(
     hint_texts = [r["content"] for r in matched_rules if r["rule_type"] == "hint"]
     incoming_summary = format_incoming_summary(payload)
 
-    # user-реплика фиксируется сразу
     turn_text = incoming_summary or incoming_text
-    await storage.add_turn(owner_user_id, "user", turn_text, chat_id=chat_id, mode="business")
 
     response, state = await _generate_secretary_reply(
         owner_user_id=owner_user_id,
@@ -430,6 +430,7 @@ async def _process_batched_business_messages(
 
     auto_reply = await storage.is_auto_reply_enabled(business_connection_id, chat_id)
     if auto_reply:
+        await storage.add_turn(owner_user_id, "user", turn_text, chat_id=chat_id, mode="business")
         await storage.add_turn(owner_user_id, "model", response.text, chat_id=chat_id, mode="business")
         await _send_business_reply(last_msg, response.text, state.rich_mode)
         return
@@ -442,6 +443,7 @@ async def _process_batched_business_messages(
         chat_id=chat_id,
         owner_user_id=owner_user_id,
         draft_text=response.text,
+        turn_text=turn_text,
         incoming_text=incoming_text,
         incoming_summary=incoming_summary,
         counterparty_name=counterparty_name,
@@ -513,7 +515,8 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     has_voice = bool(message.voice and isinstance(getattr(message.voice, "file_id", None), str))
     has_photo = bool(message.photo and isinstance(message.photo, (list, tuple)) and len(message.photo) > 0)
     has_audio = bool(message.audio and isinstance(getattr(message.audio, "file_id", None), str))
-    if not has_text and not (has_voice or has_photo or has_audio):
+    has_doc = bool(message.document and isinstance(getattr(message.document, "file_id", None), str))
+    if not has_text and not (has_voice or has_photo or has_audio or has_doc):
         return
 
     chat_id = message.chat.id
@@ -585,6 +588,8 @@ async def on_draft_reply(message: Message, bot: Bot) -> None:
             await message.answer("⚠️ Не удалось отправить сообщение в чат с клиентом.")
             return
 
+        if draft.turn_text:
+            await storage.add_turn(draft.owner_user_id, "user", draft.turn_text, chat_id=draft.chat_id, mode="business")
         await storage.add_turn(draft.owner_user_id, "model", parsed.text, chat_id=draft.chat_id, mode="business")
         _pending_drafts.pop(draft_id, None)
         draft_registry.remove_draft(draft_id)
@@ -680,6 +685,8 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
                 "⚠️ Не удалось отправить — возможно, чат неактивен более 24ч.", show_alert=True
             )
             return
+        if draft.turn_text:
+            await storage.add_turn(draft.owner_user_id, "user", draft.turn_text, chat_id=draft.chat_id, mode="business")
         await storage.add_turn(draft.owner_user_id, "model", draft.draft_text, chat_id=draft.chat_id, mode="business")
         _pending_drafts.pop(draft_id, None)
         draft_registry.remove_draft(draft_id)
@@ -698,6 +705,10 @@ async def cb_business_draft(callback: CallbackQuery, bot: Bot) -> None:
                 text=draft.draft_text,
                 business_connection_id=draft.business_connection_id,
             )
+            if draft.turn_text:
+                await storage.add_turn(
+                    draft.owner_user_id, "user", draft.turn_text, chat_id=draft.chat_id, mode="business"
+                )
             await storage.add_turn(
                 draft.owner_user_id, "model", draft.draft_text, chat_id=draft.chat_id, mode="business"
             )

@@ -51,6 +51,12 @@ class AccessMiddleware(BaseMiddleware):
                     await cb.answer("⛔️ Доступ к боту ограничен.", show_alert=False)
                 except Exception:
                     pass
+            inl = getattr(event, "inline_query", None)
+            if inl is not None:
+                try:
+                    await inl.answer([], cache_time=0)
+                except Exception:
+                    pass
             return None  # молча игнорируем чужих
 
         return await handler(event, data)

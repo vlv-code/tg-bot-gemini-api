@@ -30,6 +30,7 @@ class GeminiResponse:
     prompt_tokens: int = 0
     candidates_tokens: int = 0
     total_tokens: int = 0
+    used_model: str = ""
 
 
 class GeminiClient:
@@ -220,6 +221,7 @@ class GeminiClient:
             prompt_tokens=prompt_tokens,
             candidates_tokens=candidates_tokens,
             total_tokens=total_tokens,
+            used_model=current_model,
         )
 
     async def generate_speech(
@@ -253,6 +255,7 @@ class GeminiClient:
                         )
                     )
                 ),
+                response_mime_type="audio/L16;codec=pcm;rate=24000",
             )
             try:
                 logger.info("Генерация TTS для текста (%d симв.) голосом %s через модель %s...", len(text), effective_voice, target_model)
@@ -317,9 +320,7 @@ class GeminiClient:
 
                 disp = getattr(m, "display_name", "") or mid
                 desc = (getattr(m, "description", "") or "").lower()
-                methods = getattr(m, "supported_generation_methods", []) or []
-                if not isinstance(methods, (list, tuple, set)):
-                    methods = []
+                methods = list(getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or [])
 
                 mid_lower = mid.lower()
                 if "tts" in mid_lower or "speech" in desc:

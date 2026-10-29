@@ -1,3 +1,4 @@
+import hashlib
 import html
 import logging
 
@@ -22,7 +23,6 @@ from keyboards import (
     main_menu_keyboard,
     mode_model_selector_keyboard,
     models_hub_keyboard,
-    models_keyboard,
     settings_keyboard,
     tts_menu_keyboard,
     tts_models_keyboard,
@@ -285,7 +285,6 @@ async def cb_speak_response(callback: CallbackQuery) -> None:
 async def cb_menu_main(callback: CallbackQuery) -> None:
     await callback.answer()
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     is_admin = await storage.is_user_admin(user_id)
     try:
@@ -444,9 +443,22 @@ async def cb_set_mode_model(callback: CallbackQuery) -> None:
         and model_id not in settings.available_models
         and model_id not in settings.available_tts_models
     ):
-        # Пробуем найти совпадение по префиксу до _hash
-        prefix_candidate = model_id_raw.rsplit("_", 1)[0]
-        matched = next((m_id for m_id in available_ids if m_id.startswith(prefix_candidate)), None)
+        # Пробуем найти точное совпадение по префиксу и md5 хешу
+        matched = None
+        if "_" in model_id_raw:
+            prefix_candidate, hash_candidate = model_id_raw.rsplit("_", 1)
+            matched = next(
+                (
+                    m_id
+                    for m_id in available_ids
+                    if m_id.startswith(prefix_candidate)
+                    and hashlib.md5(m_id.encode("utf-8")).hexdigest()[:6] == hash_candidate
+                ),
+                None,
+            )
+            if not matched:
+                matched = next((m_id for m_id in available_ids if m_id.startswith(prefix_candidate)), None)
+
         if matched:
             model_id = matched
         else:
@@ -477,26 +489,6 @@ async def cb_set_mode_model(callback: CallbackQuery) -> None:
         if "message is not modified" not in str(exc).lower():
             logger.error("Failed to update mode model selector (%s): %s", mode, exc)
             await callback.answer("Ошибка при обновлении списка моделей", show_alert=True)
-
-
-@router.callback_query(F.data.startswith(("set_model:", "model:")))
-async def cb_set_model(callback: CallbackQuery) -> None:
-    model = callback.data.split(":", 1)[1]
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id if callback.message else user_id
-    await storage.set_user_mode_model(user_id, "stand", model)
-    await storage.clear_history(user_id, chat_id=chat_id)
-    state = await storage.get_settings(user_id)
-    try:
-        await callback.message.edit_text(
-            _render_models_hub_text(state),
-            parse_mode="HTML",
-            reply_markup=models_hub_keyboard(state),
-        )
-    except TelegramBadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.error("Failed to update models hub: %s", exc)
-    await callback.answer(f"Модель переключена на {model} (контекст чата очищен)")
 
 
 @router.callback_query(F.data == "menu:tts")
@@ -533,6 +525,15 @@ async def cb_menu_tts_models(callback: CallbackQuery) -> None:
 async def cb_set_tts_model(callback: CallbackQuery) -> None:
     model = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
+
+    is_valid = (
+        model in settings.available_tts_models
+        or await storage.is_model_enabled(model)
+    )
+    if not is_valid:
+        await callback.answer("Модель недоступна или отключена", show_alert=True)
+        return
+
     await storage.set_tts_model(user_id, model)
     await callback.answer(f"TTS модель: {model}")
 
@@ -564,6 +565,11 @@ async def cb_menu_tts_voices(callback: CallbackQuery) -> None:
 async def cb_set_tts_voice(callback: CallbackQuery) -> None:
     voice = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
+
+    if voice not in settings.available_voices:
+        await callback.answer("Голос недоступен", show_alert=True)
+        return
+
     await storage.set_tts_voice(user_id, voice)
     await callback.answer(f"Голос озвучки: {voice}")
 
@@ -682,7 +688,6 @@ async def cb_clear_chat(callback: CallbackQuery) -> None:
         except TelegramBadRequest:
             pass
     else:
-        chat_id = callback.message.chat.id if callback.message else user_id
         state = await storage.get_settings(user_id)
         try:
             await callback.message.edit_text(

@@ -1,8 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
-import hashlib
 import html
-import io
 import ipaddress
 import logging
 import re
@@ -468,6 +466,7 @@ async def _send_response(
     response: GeminiResponse,
     prompt_text: str = "",
     want_audio: bool = False,
+    author_id: Optional[int] = None,
 ) -> None:
     """Отправляет ответ пользователю (голосовое сообщение и/или текст с цитатой запроса)."""
     audio_bytes = response.audio_bytes
@@ -493,13 +492,13 @@ async def _send_response(
         full_text = _format_with_prompt_quote(prompt_text, response.text)
         speak_kb = None
         if not want_audio:
-            author_id = message.from_user.id if message.from_user else 0
+            target_author_id = author_id or (message.from_user.id if message.from_user else 0)
             speak_kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
                             text="🎙 Озвучить ответ",
-                            callback_data=f"speak_response:{author_id}",
+                            callback_data=f"speak_response:{target_author_id}",
                         )
                     ]
                 ]
@@ -673,7 +672,7 @@ async def _process_user_turn(
                     await storage.record_token_usage(
                         user_id=user_id,
                         chat_id=chat_id,
-                        model=target_model,
+                        model=getattr(response, "used_model", None) or target_model,
                         prompt_tokens=response.prompt_tokens,
                         candidates_tokens=response.candidates_tokens,
                         total_tokens=response.total_tokens,
@@ -685,6 +684,7 @@ async def _process_user_turn(
             response=response,
             prompt_text="" if no_quote else history_text,
             want_audio=want_audio,
+            author_id=user_id,
         )
 
 
@@ -754,10 +754,22 @@ async def _execute_inline_generation(
         persona_name = session.persona_name
     else:
         raw_query = raw_query_override or ""
-        is_quick = not session_id.startswith("stand_")
+        personas = await storage.get_all_personas(user_id)
+        parsed_q, p_dict, mode = _parse_inline_query_intent(raw_query, personas)
+        raw_query = parsed_q
+        if p_dict:
+            persona_prompt = p_dict.get("prompt", "")
+            persona_name = p_dict.get("name", "Аватар")
+            is_quick = True
+        elif mode == "stand":
+            persona_prompt = ""
+            persona_name = "Stand"
+            is_quick = False
+        else:
+            persona_prompt = ""
+            persona_name = "Аватар" if not session_id.startswith("stand_") else "Stand"
+            is_quick = not session_id.startswith("stand_")
         interactive = session_id.startswith("prev_")
-        persona_prompt = ""
-        persona_name = "Аватар" if is_quick else "Stand"
 
     try:
         status_text = (
@@ -928,7 +940,7 @@ async def _execute_inline_generation(
             await storage.record_token_usage(
                 user_id=user_id,
                 chat_id=user_id,
-                model=target_model,
+                model=getattr(response, "used_model", None) or target_model,
                 prompt_tokens=response.prompt_tokens,
                 candidates_tokens=response.candidates_tokens,
                 total_tokens=response.total_tokens,

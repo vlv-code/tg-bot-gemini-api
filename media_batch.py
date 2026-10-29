@@ -15,8 +15,8 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# 20 MB safety limit for downloaded media
-MAX_MEDIA_BYTES = 20 * 1024 * 1024
+# 15 MB safety limit for downloaded media
+MAX_MEDIA_BYTES = 15 * 1024 * 1024
 
 
 @dataclass
@@ -88,7 +88,7 @@ async def build_media_batch(bot: Bot, messages: list[Message]) -> MediaBatchPayl
                 raw_bytes = await _download_file_bytes(bot, file_id)
                 if raw_bytes is not None:
                     if len(raw_bytes) > MAX_MEDIA_BYTES:
-                        payload.media_badges.append("⚠️ Медиа > 20 МБ пропущено")
+                        payload.media_badges.append("⚠️ Медиа > 15 МБ пропущено")
                     else:
                         part = types.Part.from_bytes(data=raw_bytes, mime_type="audio/ogg")
                         payload.gemini_parts.append(part)
@@ -104,7 +104,7 @@ async def build_media_batch(bot: Bot, messages: list[Message]) -> MediaBatchPayl
                 raw_bytes = await _download_file_bytes(bot, file_id)
                 if raw_bytes is not None:
                     if len(raw_bytes) > MAX_MEDIA_BYTES:
-                        payload.media_badges.append("⚠️ Медиа > 20 МБ пропущено")
+                        payload.media_badges.append("⚠️ Медиа > 15 МБ пропущено")
                     else:
                         part = types.Part.from_bytes(data=raw_bytes, mime_type="image/jpeg")
                         payload.gemini_parts.append(part)
@@ -119,7 +119,7 @@ async def build_media_batch(bot: Bot, messages: list[Message]) -> MediaBatchPayl
                 raw_bytes = await _download_file_bytes(bot, file_id)
                 if raw_bytes is not None:
                     if len(raw_bytes) > MAX_MEDIA_BYTES:
-                        payload.media_badges.append("⚠️ Медиа > 20 МБ пропущено")
+                        payload.media_badges.append("⚠️ Медиа > 15 МБ пропущено")
                     else:
                         mime_type = getattr(audio, "mime_type", None) or "audio/mpeg"
                         part = types.Part.from_bytes(data=raw_bytes, mime_type=mime_type)
@@ -127,7 +127,27 @@ async def build_media_batch(bot: Bot, messages: list[Message]) -> MediaBatchPayl
                         payload.media_badges.append("🎵 Аудио")
                         payload.has_media = True
 
-        # 5. Caption (for photos, audio, documents)
+        # 5. Document
+        doc = getattr(msg, "document", None)
+        if doc is not None:
+            file_id = getattr(doc, "file_id", None)
+            if isinstance(file_id, str) and file_id:
+                raw_size = getattr(doc, "file_size", 0)
+                file_size = raw_size if isinstance(raw_size, (int, float)) else 0
+                if file_size > MAX_MEDIA_BYTES:
+                    payload.media_badges.append("⚠️ Документ > 15 МБ пропущен")
+                else:
+                    raw_bytes = await _download_file_bytes(bot, file_id)
+                    if raw_bytes is not None:
+                        mime_type = getattr(doc, "mime_type", None) or "application/octet-stream"
+                        if not isinstance(mime_type, str):
+                            mime_type = "application/octet-stream"
+                        part = types.Part.from_bytes(data=raw_bytes, mime_type=mime_type)
+                        payload.gemini_parts.append(part)
+                        payload.media_badges.append("📄 Документ")
+                        payload.has_media = True
+
+        # 6. Caption (for photos, audio, documents)
         caption = getattr(msg, "caption", None)
         if isinstance(caption, str) and caption:
             text_parts.append(caption)

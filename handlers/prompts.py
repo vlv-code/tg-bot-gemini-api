@@ -1,4 +1,4 @@
-﻿import html
+import html
 import logging
 
 from aiogram import F, Router
@@ -33,6 +33,47 @@ from handlers.common import (
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+def _parse_prompt_preset_assignment(raw_arg: str) -> Optional[tuple[str, str]]:
+    """Парсит аргумент создания/редактирования пресета:
+    - с явным префиксом: (add|save|edit|изменить|сохранить|добавить|ред) Имя = Текст
+    - по строгому формату: Имя = Текст (где Имя <= 32 симв., без '?' и перевода строки, Текст не пустой).
+    Возвращает (имя, текст) или None (если это обычный вопрос со знаком '=').
+    """
+    if "=" not in raw_arg:
+        return None
+    left, p_text = raw_arg.split("=", 1)
+    p_name = left.strip()
+    p_text = p_text.strip()
+    if not p_text:
+        return None
+
+    prefixes = ("add", "save", "edit", "изменить", "сохранить", "добавить", "ред")
+    lower_name = p_name.lower()
+
+    # Явный префикс без имени (например: "save = prompt")
+    if lower_name in prefixes:
+        return None
+
+    # Явный префикс с именем (например: "save Code = write python")
+    for prefix in prefixes:
+        prefix_space = prefix + " "
+        if lower_name.startswith(prefix_space):
+            clean_name = p_name[len(prefix_space):].strip()
+            if clean_name:
+                return clean_name, p_text
+            return None
+
+    # Без префикса: если это вопрос (заканчивается на '?') — это не пресет
+    if raw_arg.strip().endswith("?"):
+        return None
+
+    # Строгая эвристика без префикса: короткое имя без знаков вопроса и переводов строк
+    if p_name and len(p_name) <= 32 and not any(ch in p_name for ch in ("?", "\n")):
+        return p_name, p_text
+
+    return None
 
 
 # --- Команды управления промптами и личностями ---
@@ -72,19 +113,13 @@ async def cmd_prompt(message: Message) -> None:
         return
 
     # Создание или редактирование: /prompt edit Имя = Текст или /prompt Имя = Текст
-    if "=" in raw_arg:
-        left, p_text = raw_arg.split("=", 1)
-        p_name = left.strip()
-        for prefix in ("add ", "save ", "edit ", "изменить ", "сохранить ", "добавить ", "ред "):
-            if p_name.lower().startswith(prefix):
-                p_name = p_name[len(prefix):].strip()
-                break
-        p_text = p_text.strip()
-        if p_name and p_text:
-            await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="main")
-            await storage.set_system_prompt(user_id, p_text)
-            await message.answer(f"Stand-промпт <b>«{html.escape(p_name)}»</b> сохранён и активирован! 🥊", parse_mode="HTML")
-            return
+    preset_match = _parse_prompt_preset_assignment(raw_arg)
+    if preset_match:
+        p_name, p_text = preset_match
+        await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="main")
+        await storage.set_system_prompt(user_id, p_text)
+        await message.answer(f"Stand-промпт <b>«{html.escape(p_name)}»</b> сохранён и активирован! 🥊", parse_mode="HTML")
+        return
 
     # Проверяем удаление: /prompt del Имя или /prompt delete Имя
     if raw_arg.lower().startswith(("del ", "delete ", "rm ", "удалить ")):
@@ -150,19 +185,13 @@ async def cmd_avatar(message: Message) -> None:
         return
 
     # Создание или редактирование: /avatar edit Имя = Текст или /avatar Имя = Текст
-    if "=" in raw_arg:
-        left, p_text = raw_arg.split("=", 1)
-        p_name = left.strip()
-        for prefix in ("add ", "save ", "edit ", "изменить ", "сохранить ", "добавить ", "ред "):
-            if p_name.lower().startswith(prefix):
-                p_name = p_name[len(prefix):].strip()
-                break
-        p_text = p_text.strip()
-        if p_name and p_text:
-            await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
-            await storage.set_quick_prompt(user_id, p_text)
-            await message.answer(f"Личность Аватара <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
-            return
+    preset_match = _parse_prompt_preset_assignment(raw_arg)
+    if preset_match:
+        p_name, p_text = preset_match
+        await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
+        await storage.set_quick_prompt(user_id, p_text)
+        await message.answer(f"Личность Аватара <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
+        return
 
     # Удаление личности: /avatar del Имя
     if raw_arg.lower().startswith(("del ", "delete ", "rm ", "удалить ")):
@@ -213,19 +242,13 @@ async def cmd_qprompt(message: Message) -> None:
         return
 
     # Если пользователь ввёл команду вида /qprompt edit Имя = Текст или /qprompt Имя = Текст
-    if "=" in raw_arg:
-        left, p_text = raw_arg.split("=", 1)
-        p_name = left.strip()
-        for prefix in ("add ", "save ", "edit ", "изменить ", "сохранить ", "добавить ", "ред "):
-            if p_name.lower().startswith(prefix):
-                p_name = p_name[len(prefix):].strip()
-                break
-        p_text = p_text.strip()
-        if p_name and p_text:
-            await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
-            await storage.set_quick_prompt(user_id, p_text)
-            await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
-            return
+    preset_match = _parse_prompt_preset_assignment(raw_arg)
+    if preset_match:
+        p_name, p_text = preset_match
+        await storage.save_user_prompt(user_id, name=p_name, prompt=p_text, mode="quick")
+        await storage.set_quick_prompt(user_id, p_text)
+        await message.answer(f"Личность <b>«{html.escape(p_name)}»</b> сохранена и активирована! 🎭", parse_mode="HTML")
+        return
 
     matched = await storage.find_persona_by_name_or_id(user_id, raw_arg)
     if matched:
@@ -242,7 +265,6 @@ async def cmd_qprompt(message: Message) -> None:
 
 @router.callback_query(F.data == "menu:prompt")
 async def cb_menu_prompt(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -257,7 +279,6 @@ async def cb_menu_prompt(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "reset_prompt")
 async def cb_reset_prompt(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     await storage.set_system_prompt(callback.from_user.id, "")
     state = await storage.get_settings(callback.from_user.id)
     try:
@@ -273,7 +294,6 @@ async def cb_reset_prompt(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:qprompt")
 async def cb_menu_qprompt(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     state = await storage.get_settings(callback.from_user.id)
     try:
         await callback.message.edit_text(
@@ -288,7 +308,6 @@ async def cb_menu_qprompt(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "reset_qprompt")
 async def cb_reset_qprompt(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     await storage.set_quick_prompt(callback.from_user.id, "")
     state = await storage.get_settings(callback.from_user.id)
     try:
@@ -304,7 +323,6 @@ async def cb_reset_qprompt(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:personas")
 async def cb_menu_personas(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     state = await storage.get_settings(callback.from_user.id)
     personas = await storage.get_all_personas(callback.from_user.id)
     pinned_ids = await storage.get_pinned_persona_ids(callback.from_user.id)
@@ -324,7 +342,6 @@ async def cb_menu_personas(callback: CallbackQuery) -> None:
 async def cb_persona_info(callback: CallbackQuery) -> None:
     persona_id = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
     if not persona:
@@ -358,7 +375,6 @@ async def cb_persona_info(callback: CallbackQuery) -> None:
 async def cb_persona_pin(callback: CallbackQuery) -> None:
     persona_id = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     persona = await storage.find_persona_by_name_or_id(user_id, persona_id)
     if not persona:
@@ -403,7 +419,6 @@ async def cb_persona_set(callback: CallbackQuery) -> None:
     title = persona.get("title") or persona["name"]
     await callback.answer(f"Личность «{title}» активирована! 🎭", show_alert=True)
 
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     personas = await storage.get_all_personas(user_id)
     pinned_ids = await storage.get_pinned_persona_ids(user_id)
@@ -432,7 +447,6 @@ async def cb_persona_del(callback: CallbackQuery) -> None:
     else:
         await callback.answer("Не удалось удалить личность ❌", show_alert=True)
 
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     personas = await storage.get_all_personas(user_id)
     pinned_ids = await storage.get_pinned_persona_ids(user_id)
@@ -516,7 +530,6 @@ async def cb_persona_guide(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:prompts")
 async def cb_menu_prompts(callback: CallbackQuery) -> None:
-    chat_id = callback.message.chat.id if callback.message else callback.from_user.id
     state = await storage.get_settings(callback.from_user.id)
     presets = await storage.get_all_stand_presets(callback.from_user.id)
     current_prompt = state.system_prompt or settings.system_prompt or ""
@@ -535,7 +548,6 @@ async def cb_menu_prompts(callback: CallbackQuery) -> None:
 async def cb_stand_info(callback: CallbackQuery) -> None:
     preset_id = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     preset = await storage.find_stand_preset_by_name_or_id(user_id, preset_id)
     if not preset:
@@ -576,7 +588,6 @@ async def cb_stand_set(callback: CallbackQuery) -> None:
     title = preset.get("title") or preset["name"]
     await callback.answer(f"Промпт «{title}» активирован! 🥊", show_alert=True)
 
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     presets = await storage.get_all_stand_presets(user_id)
     try:
@@ -632,7 +643,6 @@ async def cb_stand_del(callback: CallbackQuery) -> None:
     else:
         await callback.answer("Не удалось удалить промпт ❌", show_alert=True)
 
-    chat_id = callback.message.chat.id if callback.message else user_id
     state = await storage.get_settings(user_id)
     presets = await storage.get_all_stand_presets(user_id)
     current_prompt = state.system_prompt or settings.system_prompt or ""
@@ -652,4 +662,3 @@ async def cb_stand_add_hint(callback: CallbackQuery) -> None:
         "Чтобы сохранить свой Stand-промпт, отправьте команду:\n/prompt add Имя = Текст промпта",
         show_alert=True,
     )
-

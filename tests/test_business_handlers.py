@@ -443,7 +443,7 @@ class TestSecretaryModeFlow(unittest.IsolatedAsyncioTestCase):
 
         state = await biz.storage.get(OWNER_ID, chat_id=CLIENT_CHAT_ID, mode="business")
         roles = [t.role for t in state.history]
-        self.assertEqual(roles, ["user"])  # только реплика клиента, ответа модели в истории нет
+        self.assertEqual(roles, [])  # AUD-10: отклонённый черновик не оставляет осиротевшую реплику в истории
 
     async def test_regenerated_then_sent_draft_writes_only_final_text_to_history(self):
         await biz.on_business_connection(_fake_connection_event(), _fake_bot())

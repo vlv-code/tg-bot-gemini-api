@@ -8,6 +8,7 @@
 import asyncio
 import hashlib
 import os
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -46,6 +47,7 @@ def _format_baseline_models() -> list[dict]:
                 "output_modalities": "text",
                 "is_enabled": 1,
                 "sort_order": sort_order,
+                "is_pinned": 0,
             }
         )
     for mid in settings.available_tts_models:
@@ -58,6 +60,7 @@ def _format_baseline_models() -> list[dict]:
                 "output_modalities": "audio",
                 "is_enabled": 1,
                 "sort_order": 20,
+                "is_pinned": 0,
             }
         )
     return baseline
@@ -298,10 +301,17 @@ class UserStorage:
                     output_modalities TEXT NOT NULL,
                     is_enabled INTEGER DEFAULT 1,
                     sort_order INTEGER DEFAULT 100,
+                    is_pinned INTEGER DEFAULT 0,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            # Миграция: добавляем is_pinned в discovered_models, если его ещё нет
+            cursor = await db.execute("PRAGMA table_info(discovered_models)")
+            disc_columns = [row["name"] for row in await cursor.fetchall()]
+            if "is_pinned" not in disc_columns:
+                await db.execute("ALTER TABLE discovered_models ADD COLUMN is_pinned INTEGER DEFAULT 0")
+
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_discovered_models_cat ON discovered_models (category, is_enabled, sort_order)"
             )
@@ -608,6 +618,17 @@ class UserStorage:
                         m.get("sort_order", 100),
                     ),
                 )
+
+            fresh_model_ids = sorted(list({m["model_id"] for m in models if "model_id" in m}))
+            baseline_complete = bool(settings.available_models) and set(settings.available_models).issubset(set(fresh_model_ids))
+            if baseline_complete and fresh_model_ids:
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                placeholders = ",".join("?" for _ in fresh_model_ids)
+                await db.execute(
+                    f"UPDATE discovered_models SET is_enabled = 0, updated_at = ? WHERE is_pinned = 0 AND model_id NOT IN ({placeholders})",
+                    (now, *fresh_model_ids),
+                )
+
             await db.commit()
             if hasattr(self, "_available_models_cache"):
                 self._available_models_cache.clear()
@@ -624,22 +645,22 @@ class UserStorage:
         if category:
             if enabled_only:
                 cursor = await db.execute(
-                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models WHERE category = ? AND is_enabled = 1 ORDER BY sort_order ASC, model_id ASC",
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, is_pinned, updated_at FROM discovered_models WHERE category = ? AND is_enabled = 1 ORDER BY sort_order ASC, model_id ASC",
                     (category,),
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models WHERE category = ? ORDER BY sort_order ASC, model_id ASC",
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, is_pinned, updated_at FROM discovered_models WHERE category = ? ORDER BY sort_order ASC, model_id ASC",
                     (category,),
                 )
         else:
             if enabled_only:
                 cursor = await db.execute(
-                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models WHERE is_enabled = 1 ORDER BY sort_order ASC, model_id ASC",
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, is_pinned, updated_at FROM discovered_models WHERE is_enabled = 1 ORDER BY sort_order ASC, model_id ASC",
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, updated_at FROM discovered_models ORDER BY sort_order ASC, model_id ASC",
+                    "SELECT model_id, display_name, category, input_modalities, output_modalities, is_enabled, sort_order, is_pinned, updated_at FROM discovered_models ORDER BY sort_order ASC, model_id ASC",
                 )
         rows = await cursor.fetchall()
         if rows:
@@ -663,17 +684,21 @@ class UserStorage:
         models = await self.get_available_models(category=category, enabled_only=True)
         return [m["model_id"] for m in models]
 
-    async def toggle_discovered_model(self, model_id: str, is_enabled: bool) -> None:
-        """Включает или выключает модель в каталоге."""
+    async def set_model_enabled(self, model_id: str, is_enabled: bool) -> None:
+        """Устанавливает статус активности модели администратором и фиксирует выбор (is_pinned = 1)."""
         async with self._write_lock:
             db = await self._ensure_db()
             await db.execute(
-                "UPDATE discovered_models SET is_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE model_id = ?",
+                "UPDATE discovered_models SET is_enabled = ?, is_pinned = 1, updated_at = CURRENT_TIMESTAMP WHERE model_id = ?",
                 (1 if is_enabled else 0, model_id),
             )
             await db.commit()
             if hasattr(self, "_available_models_cache"):
                 self._available_models_cache.clear()
+
+    async def toggle_discovered_model(self, model_id: str, is_enabled: bool) -> None:
+        """Включает или выключает модель в каталоге (обратная совместимость)."""
+        await self.set_model_enabled(model_id, is_enabled)
 
     async def toggle_rich(self, user_id: int) -> bool:
 

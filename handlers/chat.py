@@ -1,6 +1,7 @@
 import io
 import os
 import logging
+import re
 from typing import Optional, Union
 
 from aiogram import F, Router
@@ -47,6 +48,52 @@ class DocumentValidationError(Exception):
     def __init__(self, message: str) -> None:
         self.message = message
         super().__init__(message)
+
+
+_bot_username_cache: dict[int, str] = {}
+
+
+async def _get_bot_username(bot: Bot) -> str:
+    bot_id = getattr(bot, "id", None) or 0
+    if bot_id in _bot_username_cache:
+        return _bot_username_cache[bot_id]
+    try:
+        me = await bot.get_me()
+        if me and me.username:
+            _bot_username_cache[bot_id] = me.username.lower()
+            return _bot_username_cache[bot_id]
+    except Exception:
+        pass
+    return ""
+
+
+async def _check_group_message_allowed(message: Message, text_or_caption: str) -> tuple[bool, str]:
+    """Проверяет, адресовано ли сообщение боту в группе/супергруппе."""
+    if message.chat.type not in ("group", "supergroup"):
+        return True, text_or_caption
+
+    bot = message.bot
+    bot_id = getattr(bot, "id", None)
+
+    # 1. Reply на сообщение бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        if bot_id and message.reply_to_message.from_user.id == bot_id:
+            return True, text_or_caption
+        if getattr(message.reply_to_message.from_user, "is_bot", False):
+            bot_username = await _get_bot_username(bot)
+            if bot_username and (message.reply_to_message.from_user.username or "").lower() == bot_username:
+                return True, text_or_caption
+
+    # 2. Упоминание бота (@bot_username)
+    bot_username = await _get_bot_username(bot)
+    if bot_username and text_or_caption:
+        mention = f"@{bot_username}"
+        if mention in text_or_caption.lower():
+            pattern = re.compile(re.escape(mention), re.IGNORECASE)
+            cleaned = pattern.sub("", text_or_caption).strip()
+            return True, cleaned
+
+    return False, ""
 
 
 def _validate_document(doc) -> Optional[str]:
@@ -538,8 +585,12 @@ async def cb_fwd_stand_now(callback: CallbackQuery) -> None:
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message) -> None:
-    clean_text, force_voice, force_text = _parse_caption_voice_flags(message.text)
-    clean_text = clean_text or message.text
+    is_allowed, clean_query = await _check_group_message_allowed(message, message.text or "")
+    if not is_allowed:
+        return
+
+    clean_text, force_voice, force_text = _parse_caption_voice_flags(clean_query)
+    clean_text = clean_text or clean_query
 
     replied_text, replied = _extract_reply_info(message)
     try:
@@ -605,6 +656,10 @@ async def handle_text(message: Message) -> None:
 
 @router.message(F.photo)
 async def handle_photo(message: Message) -> None:
+    is_allowed, clean_cap = await _check_group_message_allowed(message, message.caption or "")
+    if not is_allowed:
+        return
+
     user_id = message.from_user.id
     limit_status = await limiter.check(user_id)
     if not limit_status.allowed:
@@ -638,6 +693,10 @@ async def handle_photo(message: Message) -> None:
 
 @router.message(F.voice | F.audio)
 async def handle_voice(message: Message) -> None:
+    is_allowed, _ = await _check_group_message_allowed(message, message.caption or "")
+    if not is_allowed:
+        return
+
     media = message.voice or message.audio
     if getattr(media, "file_size", None) and media.file_size > MAX_DOCUMENT_SIZE_BYTES:
         mb = round(media.file_size / (1024 * 1024), 1)
@@ -680,6 +739,10 @@ async def handle_voice(message: Message) -> None:
 
 @router.message(F.document)
 async def handle_document(message: Message) -> None:
+    is_allowed, _ = await _check_group_message_allowed(message, message.caption or "")
+    if not is_allowed:
+        return
+
     doc = message.document
     val_err = _validate_document(doc)
     if val_err:

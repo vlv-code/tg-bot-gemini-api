@@ -104,10 +104,13 @@ def mode_model_selector_keyboard(
         if len(cb.encode("utf-8")) > 64:
             prefix = f"smm:{mode_code}:"
             suffix = f":p{page}"
-            max_mid_bytes = 64 - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
             h = hashlib.md5(mid.encode("utf-8")).hexdigest()[:6]
-            cut_len = max_mid_bytes - 7
-            mid_trimmed = mid[:cut_len] + "_" + h
+            fixed_overhead = len(prefix.encode("utf-8")) + len(suffix.encode("utf-8")) + 7
+            max_prefix_bytes = max(0, 64 - fixed_overhead)
+            trimmed = mid
+            while trimmed and len(trimmed.encode("utf-8")) > max_prefix_bytes:
+                trimmed = trimmed[:-1]
+            mid_trimmed = f"{trimmed}_{h}"
             cb = f"{prefix}{mid_trimmed}{suffix}"
 
         buttons.append([InlineKeyboardButton(text=label, callback_data=cb)])
@@ -127,19 +130,8 @@ def mode_model_selector_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def models_keyboard(current_model: str) -> InlineKeyboardMarkup:
-    """Меню выбора основной модели генерации текста/диалога."""
-    buttons = [
-        [
-            InlineKeyboardButton(
-                text=f"✅ {model}" if model == current_model else model,
-                callback_data=f"set_model:{model}",
-            )
-        ]
-        for model in settings.available_models
-    ]
-    buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="menu:main")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# Псевдоним для обратной совместимости
+mode_models_keyboard = mode_model_selector_keyboard
 
 
 def tts_menu_keyboard(

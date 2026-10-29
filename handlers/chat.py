@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Optional, Union
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji
 from google.genai import types

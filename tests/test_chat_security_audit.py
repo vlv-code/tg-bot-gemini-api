@@ -177,5 +177,12 @@ class TestChatSecurityAudit(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Бро:", str(call_kwargs.get("message", "")))
 
 
+    def test_chat_module_type_hints_evaluable(self):
+        import typing
+        hints = typing.get_type_hints(chat_handler._get_bot_username)
+        self.assertIn("bot", hints)
+        self.assertEqual(hints["bot"], Bot)
+
+
 if __name__ == "__main__":
     unittest.main()

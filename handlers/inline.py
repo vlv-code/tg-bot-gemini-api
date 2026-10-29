@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Optional
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     BufferedInputFile,

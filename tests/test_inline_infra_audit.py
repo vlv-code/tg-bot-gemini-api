@@ -116,5 +116,31 @@ class TestInlineInfraAudit(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cached_id, "voice_file_bg_cached")
 
 
+    def test_inline_module_type_hints_evaluable(self):
+        import typing
+        hints = typing.get_type_hints(inline_handler._generate_and_cache_tts)
+        self.assertIn("bot", hints)
+        self.assertEqual(hints["bot"], Bot)
+
+    def test_all_handlers_type_hints_evaluable_on_python312(self):
+        import importlib
+        import inspect
+        import typing
+        for mod_name in (
+            "handlers.chat",
+            "handlers.inline",
+            "handlers.prompts",
+            "handlers.business",
+            "handlers.admin",
+            "handlers.menu",
+            "handlers.common",
+        ):
+            mod = importlib.import_module(mod_name)
+            for name, obj in inspect.getmembers(mod):
+                if (inspect.isfunction(obj) or inspect.isclass(obj)) and getattr(obj, "__module__", None) == mod_name:
+                    hints = typing.get_type_hints(obj)
+                    self.assertIsInstance(hints, dict)
+
+
 if __name__ == "__main__":
     unittest.main()
